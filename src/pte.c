@@ -5,7 +5,10 @@
 PPTE pte_base;
 PPTE pte_end;
 
-PCRITICAL_SECTION pte_region_locks;
+PPTE_REGION pte_regions;
+
+PPTE_REGION_AGE_CHAIN pte_region_age_chains[NUMBER_OF_AGES];
+
 
 // These functions convert between matching linear structures (pte and va)
 PPTE pte_from_va(PVOID virtual_address)
@@ -44,6 +47,34 @@ PVOID va_from_pte(PPTE pte)
     PVOID result = (PVOID) ((ULONG_PTR) va_base + difference);
 
     return result;
+}
+
+PPTE_REGION pte_region_from_pte(PPTE pte)
+{
+    NULL_CHECK(pte, "pte_region_from_pte : pte is null")
+    if (pte < pte_base || pte >= pte_end)
+    {
+        fatal_error("pte_region_from_pte : pte is out of valid range");
+    }
+
+    ULONG64 index = (ULONG64) (pte - pte_base);
+    index /= PTE_REGION_SIZE;
+
+    return &pte_regions[index];
+}
+
+PPTE pte_from_pte_region(PPTE_REGION pte_region)
+{
+    NULL_CHECK(pte_region, "pte_from_pte_region : pte_region is null")
+    if (pte_region < pte_regions || pte_region >= &pte_regions[NUMBER_OF_PTE_REGIONS])
+    {
+        fatal_error("pte_from_pte_region : pte_region is out of valid range");
+    }
+
+    ULONG64 index = (ULONG64) (pte_region - pte_regions);
+    index *= PTE_REGION_SIZE;
+
+    return &pte_base[index];
 }
 
 // These functions are used to read and write PTEs and PFNs in a way that doesn't conflict with other threads
@@ -111,7 +142,7 @@ VOID lock_pte(PPTE pte)
     log_access(IS_A_PTE, pte, LOCK);
 #endif
 
-    EnterCriticalSection(&pte_region_locks[index]);
+    EnterCriticalSection(&pte_regions[index].lock);
 }
 
 VOID unlock_pte(PPTE pte)
@@ -123,7 +154,7 @@ VOID unlock_pte(PPTE pte)
     log_access(IS_A_PTE, pte, UNLOCK);
 #endif
 
-    LeaveCriticalSection(&pte_region_locks[index]);
+    LeaveCriticalSection(&pte_regions[index].lock);
 }
 
 BOOLEAN try_lock_pte(PPTE pte)
@@ -131,7 +162,7 @@ BOOLEAN try_lock_pte(PPTE pte)
     ULONG64 index = pte - pte_base;
     index /= PTE_REGION_SIZE;
 
-    BOOLEAN result = TryEnterCriticalSection(&pte_region_locks[index]);
+    BOOLEAN result = TryEnterCriticalSection(&pte_regions[index].lock);
 
 #if READWRITE_LOGGING
     if (result == TRUE) {
@@ -143,4 +174,65 @@ BOOLEAN try_lock_pte(PPTE pte)
 #endif
 
     return result;
+}
+
+VOID initialize_region_listhead(PPTE_REGION_LIST listhead) {
+    listhead->entry.Flink = listhead->entry.Blink = &listhead->entry;
+}
+
+VOID add_region_to_list(PPTE_REGION pte_region, PPTE_REGION_LIST listhead) {
+    PLIST_ENTRY first_entry = listhead->entry.Flink;
+
+    pte_region->entry.Flink = first_entry;
+    pte_region->entry.Blink = &listhead->entry;
+
+    first_entry->Blink = &pte_region->entry;
+
+    listhead->entry.Flink = &pte_region->entry;
+
+    listhead->num_regions++;
+}
+
+VOID remove_region_from_list(PPTE_REGION pte_region, PPTE_REGION_LIST listhead) {
+    // Remove it from the list. it could be anywhere
+    PLIST_ENTRY blink_entry = pte_region->entry.Blink;
+    PLIST_ENTRY flink_entry = pte_region->entry.Flink;
+
+    blink_entry->Flink = flink_entry;
+    flink_entry->Blink = blink_entry;
+
+    pte_region->entry.Blink = NULL;
+    pte_region->entry.Flink = NULL;
+
+    listhead->num_regions--;
+}
+
+PPTE_REGION pop_region_from_list(PPTE_REGION_LIST listhead) {
+    // This is a helper function that pops a region from the list
+    // It is used to pop the first region from the list
+    if (listhead->num_regions == 0) {
+        return NULL;
+    }
+
+    PLIST_ENTRY current_entry = listhead->entry.Flink;
+    PPTE_REGION pte_region = CONTAINING_RECORD(current_entry, PTE_REGION, entry);
+
+    while (current_entry != &listhead->entry) {
+        // Try to lock the region, if we can, we break out
+        // If we cannot, we continue to the next entry
+        if (TryEnterCriticalSection(&pte_region->lock)) {
+            break;
+        }
+
+        current_entry = current_entry->Flink;
+        if (current_entry == &listhead->entry) {
+            // If we reached the end of the list, we return NULL
+            return NULL;
+        }
+
+        pte_region = CONTAINING_RECORD(current_entry, PTE_REGION, entry);
+    }
+
+    remove_region_from_list(pte_region, listhead);
+    return pte_region;
 }

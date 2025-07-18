@@ -64,7 +64,6 @@ PPFN get_free_page(VOID) {
             return NULL;
         }
 
-
         PPTE other_pte = free_page->pte;
         ULONG64 other_disc_index = free_page->disc_index;
         // We want to start writing entire PTEs instead of writing them bit by bit
@@ -74,7 +73,7 @@ PPFN get_free_page(VOID) {
         if (local.disc_format.always_zero == 1)
         {
             printf("Valid bit was never zeroed in PTE %p\n", other_pte);
-           DebugBreak();
+            DebugBreak();
         }
         local.disc_format.on_disc = 1;
         local.disc_format.disc_index = other_disc_index;
@@ -170,6 +169,8 @@ VOID page_fault_handler(PVOID arbitrary_va, PFAULT_STATS stats)
 
         pte_contents.memory_format.age = 0;
         write_pte(pte, pte_contents);
+
+        // TODO the ages lists could be corrupted here. We need to fix this and think of a better solution
 
         unlock_pte(pte);
         return;
@@ -278,6 +279,18 @@ VOID page_fault_handler(PVOID arbitrary_va, PFAULT_STATS stats)
         pfn_contents.flags.modified = 0;
     }
     write_pfn(pfn, pfn_contents);
+
+    // Update the PTE region
+    PPTE_REGION pte_region = pte_region_from_pte(pte);
+    // No matter what case we are in, the region has gained an extra active page so we increment the age count
+    pte_region->age_counts[0]++;
+
+    if (pte_region->active == 0) {
+        pte_region->active = 1;
+        EnterCriticalSection(&pte_region_age_lists[0].lock);
+        add_region_to_list(pte_region, &pte_region_age_lists[0]);
+        LeaveCriticalSection(&pte_region_age_lists[0].lock);
+    }
 
     // This is a Windows API call that confirms the changes we made with the OS
     // We have already mapped this va to this page on our side, but the OS also needs to do the same on its side

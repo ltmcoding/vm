@@ -338,6 +338,29 @@ VOID initialize_user_va_space(VOID)
     //va__end = va_base + virtual_address_size;
 }
 
+VOID initialie_pte_regions(VOID) {
+    // Initialize the locks for the PTE regions
+    // Add PTE_REGION_SIZE - 1 to virtual_address_size to round up in case of an uneven division
+    ULONG64 num_pte_regions = (virtual_address_size + PTE_REGION_SIZE - 1) / PTE_REGION_SIZE;
+    pte_regions = malloc(num_pte_regions * sizeof(PTE));
+    NULL_CHECK(pte_regions, "initialie_pte_regions : could not allocate memory for pte regions");
+
+    for (ULONG64 i = 0; i < num_pte_regions; i++) {
+        // No need to update age counts as this only applies to active pages
+        // Initialize the critical section for the PTE region
+        InitializeCriticalSection(&pte_regions[i].lock);
+    }
+
+    pte_region_age_lists = malloc(num_pte_regions * sizeof(PTE));
+    NULL_CHECK(pte_region_age_lists, "initialie_pte_regions : could not allocate memory for pte region age lists");
+    for (ULONG64 i = 0; i < num_pte_regions; i++) {
+        // Initialize the list head for the PTE region
+        initialize_region_listhead(&pte_region_age_lists[i]);
+        pte_region_age_lists[i].num_regions = 0;
+        InitializeCriticalSection(&pte_region_age_lists[i].lock);
+    }
+}
+
 // This function initializes the PTEs that we use to map virtual addresses to physical pages
 VOID initialize_pte_metadata(VOID)
 {
@@ -350,18 +373,6 @@ VOID initialize_pte_metadata(VOID)
     pte_end = pte_base + num_pte_bytes / sizeof(PTE);
 
     memset(pte_base, 0, num_pte_bytes);
-
-    // Initialize the locks for the PTE regions
-    // Add PTE_REGION_SIZE - 1 to virtual_address_size to round up in case of an uneven division
-    ULONG64 num_pte_regions = (virtual_address_size + PTE_REGION_SIZE - 1) / PTE_REGION_SIZE;
-
-    pte_region_locks = (CRITICAL_SECTION *) malloc(num_pte_regions * sizeof(CRITICAL_SECTION));
-    NULL_CHECK(pte_region_locks, "initialize_locks : could not allocate memory for pte_region_locks")
-
-    for (unsigned i = 0; i < NUMBER_OF_PTE_REGIONS; i++)
-    {
-        INITIALIZE_LOCK(pte_region_locks[i]);
-    }
 }
 
 VOID insert_tail_list(PLIST_ENTRY listhead, PLIST_ENTRY entry) {

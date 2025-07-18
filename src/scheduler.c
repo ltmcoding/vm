@@ -4,6 +4,8 @@
 
 #include <stdio.h>
 
+#include "debug.h"
+
 MOD_WRITE_TIME mod_write_times[MOD_WRITE_TIMES_TO_TRACK];
 ULONG64 mod_write_time_index;
 
@@ -11,6 +13,8 @@ ULONG64 available_pages[SECONDS_TO_TRACK];
 ULONG64 available_pages_index;
 
 ULONG64 num_batches_to_write;
+ULONG64 num_pages_to_age;
+ULONG64 num_pages_to_trim;
 
 MOD_WRITE_TIME average_mod_write_times(VOID)
 {
@@ -115,7 +119,7 @@ DWORD task_scheduling_thread(PVOID context)
         ULONG index = WaitForMultipleObjects(ARRAYSIZE(handles), handles, FALSE, 1000);
         if (index == 0)
         {
-            set_modified_status("modified write thread exited");
+            // TODO needs its own status
             break;
         }
 
@@ -153,6 +157,7 @@ DWORD task_scheduling_thread(PVOID context)
             // We divide the time to empty the modified list by the time until we have no more pages
             // This gives us a fraction of the time that we should write
             DOUBLE fraction_used = (DOUBLE) time_to_empty_modified / (DOUBLE) time_until_no_pages;
+            assert(fraction_used <= 1);
             num_batches_local = (ULONG64) ((DOUBLE) max_possible_batches * fraction_used);
         }
 

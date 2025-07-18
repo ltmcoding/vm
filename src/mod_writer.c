@@ -101,7 +101,6 @@ BOOLEAN write_pages_to_disc(VOID)
             local.flags.state = STANDBY;
             local.flags.reference -= 1;
             write_pfn(pfn, local);
-            unlock_pfn(pfn);
         }
         // In this case we know that the page in memory was written during our pagefile write
         // We have to throw away our page file space as it is stale data now
@@ -109,8 +108,8 @@ BOOLEAN write_pages_to_disc(VOID)
             local.flags.reference -= 1;
             local.flags.modified = 0;
             write_pfn(pfn, local);
-            unlock_pfn(pfn);
 
+            frame_numbers[i] = 0;
             free_disc_index(disc_indices[i]);
         }
         // Once reads are implemented, the write is still good and we should keep the copy on the disc.
@@ -125,6 +124,16 @@ BOOLEAN write_pages_to_disc(VOID)
     link_list_to_tail(&standby_page_list, &batch_list);
 
     LeaveCriticalSection(&standby_page_list.lock);
+
+    for (ULONG64 i = 0; i < target_pages; i++)
+    {
+        // If the frame number is zero, it means that the page was written to and we freed the disc index
+        if (frame_numbers[i] != 0)
+        {
+            // Unlock the PFN so that it can be used again
+            unlock_pfn(pfn_from_frame_number(frame_numbers[i]));
+        }
+    }
 
     // Signal to other threads that pages are available
     SetEvent(pages_available_event);
@@ -164,7 +173,8 @@ DWORD modified_write_thread(PVOID context)
 
         ULONG64 batches = *(volatile ULONG64 *) (&num_batches_to_write);
         for (ULONG64 i = 0; i < batches; i++) {
-            // TODO LM FIX What if we can't write the pages to disc
+            // If there are no pages to be written, indicated by returning false
+            // Then the thread waits to be woken up again and retry
             if (write_pages_to_disc() == FALSE)
             {
                 break;

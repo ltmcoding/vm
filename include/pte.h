@@ -43,22 +43,31 @@ typedef struct {
     };
 } PTE, *PPTE;
 
+typedef struct {
+    LIST_ENTRY entry;
+    ULONG64 num_regions;
+    CRITICAL_SECTION lock;
+} PTE_REGION_LIST, *PPTE_REGION_LIST;
 
 
 typedef struct {
-    ULONG64 age_counts[(NUMBER_OF_AGES * 10) / 64];
-    ULONG64 active_bitmap[PTE_REGION_SIZE / 64];
+    ULONG64 age_counts[NUMBER_OF_AGES];
     LIST_ENTRY entry;
-    //LOCK lock;
+    CRITICAL_SECTION lock;
+    ULONG active:1;
 } PTE_REGION, *PPTE_REGION;
 
 extern PPTE pte_base;
 extern PPTE pte_end;
 
-extern PCRITICAL_SECTION pte_region_locks;
+extern PPTE_REGION pte_regions;
+
+extern PPTE_REGION_LIST pte_region_age_lists;
 
 extern PPTE pte_from_va(PVOID virtual_address);
 extern PVOID va_from_pte(PPTE pte);
+extern PPTE_REGION pte_region_from_pte(PPTE pte);
+extern PPTE pte_from_pte_region(PPTE_REGION pte_region);
 
 extern VOID lock_pte(PPTE pte);
 extern VOID unlock_pte(PPTE pte);
@@ -66,5 +75,10 @@ extern BOOLEAN try_lock_pte(PPTE pte);
 
 extern PTE read_pte(PPTE pte);
 extern VOID write_pte(PPTE pte, PTE pte_contents);
+
+extern VOID initialize_region_listhead(PPTE_REGION_LIST listhead);
+extern VOID add_region_to_list(PPTE_REGION pte_region, PPTE_REGION_LIST listhead);
+extern VOID remove_region_from_list(PPTE_REGION pte_region, PPTE_REGION_LIST listhead);
+extern PPTE_REGION pop_region_from_list(PPTE_REGION_LIST listhead);
 
 #endif //VM_PTE_H

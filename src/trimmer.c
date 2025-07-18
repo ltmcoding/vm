@@ -55,154 +55,113 @@ void trim(PPTE pte)
     unlock_pfn(pfn);
 }
 
-// This function ages PTEs by incrementing their age by 1
-// If the age is 7, then the page is trimmed
-// Their age is reset when they are accessed by a program
-// This is a very simple aging algorithm that is not very effective
-// It is only used as a placeholder until a better algorithm is implemented
-VOID age_pages()
-{
-    PPTE pte;
-    PTE local;
-    pte = pte_base;
+ULONG trim_pte_region(ULONG min_age_to_trim) {
+    PFN_LIST batch_list;
+    ULONG trim_batch_size = 0;
+    ULONG64 frame_numbers[PTE_REGION_SIZE];
 
-    // Iterates over all PTEs and ages them
-    while (pte != pte_end)
-    {
-        lock_pte(pte);
-        if (pte->memory_format.valid == 1)
-        {
-            if (pte->memory_format.age == 7)
-            {
-                trim(pte);
-            }
-            else
-            {
-                local = read_pte(pte);
-                local.memory_format.age += 1;
-                write_pte(pte, local);
-            }
+    initialize_listhead(&batch_list);
+
+    for (LONG64 age = NUMBER_OF_AGES - 1; age >= 0; age--) {
+        PPTE_REGION_LIST listhead = &pte_region_age_lists[age];
+        EnterCriticalSection(&listhead->lock);
+
+        // Try to pop a region from the list. If we succesfully can it comes with the lock held
+        PPTE_REGION region = pop_region_from_list(listhead);
+        if (region == NULL) {
+            LeaveCriticalSection(&listhead->lock);
+            continue;
         }
-        unlock_pte(pte);
-        pte++;
-    }
-}
+        LeaveCriticalSection(&listhead->lock);
 
-VOID age_pte_regions()
-{
-    PPTE pte;
-    PTE local;
+        // Grab the first PTE in the region
+        PPTE current_pte = pte_from_pte_region(region);
+        ULONG oldest_age = 0;
+        PPFN pfn;
 
-    for (ULONG64 region = 0; region < NUMBER_OF_PTE_REGIONS; region++)
-    {
-        pte = pte_base + region * PTE_REGION_SIZE;
-        if (pte == pte_end)
-        {
-            break;
-        }
-        // Lock the PTE at the beginning of the region, which locks the entire region
-        lock_pte(pte);
-        for (ULONG64 index = 0; index < PTE_REGION_SIZE; index++)
-        {
-            if (pte == pte_end)
+        for (ULONG index = 0; index < PTE_REGION_SIZE; index++) {
+            // Break early if we reach the end of the PTEs
+            if (current_pte == pte_end)
             {
                 break;
             }
+            // Check the valid bit of the PTE
+            if (current_pte->memory_format.valid == 1) {
+                // If the page is not old enough, we skip it after noting its age
+                if (current_pte->memory_format.age < min_age_to_trim) {
 
-            if (pte->memory_format.valid == 1)
-            {
-                if (pte->memory_format.age == 7)
-                {
-                    trim(pte);
+                    if (current_pte->memory_format.age > oldest_age) {
+                        oldest_age = current_pte->memory_format.age;
+                    }
                 }
-                else
-                {
-                    local = read_pte(pte);
-                    local.memory_format.age += 1;
-                    write_pte(pte, local);
+                // If the page is older than the minimum age, we trim it
+                else {
+                    pfn = pfn_from_frame_number(current_pte->memory_format.frame_number);
+                    lock_pfn(pfn);
+
+                    // If the page is being referenced by the modified writer, we cannot trim it
+                    if (pfn->flags.reference == 1) {
+                        unlock_pfn(pfn);
+                        current_pte++;
+                        continue;
+                    }
+
+                    add_to_list_head(pfn, &batch_list);
+                    frame_numbers[index] = current_pte->memory_format.frame_number;
+
+                    PVOID user_va = va_from_pte(current_pte);
+                    NULL_CHECK(user_va, "trim : could not get the va connected to the pte")
+
+                    // The user VA is still mapped, we need to unmap it here to stop the user from changing it
+                    // Any attempt to modify this va will lead to a page fault so that we will not be able to have stale data
+                    unmap_pages(user_va, 1);
+
+                    // This writes the new contents into the PTE and PFN
+                    PTE old_pte_contents = read_pte(current_pte);
+                    assert(old_pte_contents.memory_format.valid == 1)
+
+                    PTE new_pte_contents;
+                    // The PTE is zeroed out here to ensure no stale data remains
+                    new_pte_contents.entire_format = 0;
+                    new_pte_contents.transition_format.always_zero = 0;
+                    new_pte_contents.transition_format.frame_number = old_pte_contents.memory_format.frame_number;
+                    new_pte_contents.transition_format.always_zero2 = 0;
+
+                    write_pte(current_pte, new_pte_contents);
+
+                    PFN pfn_contents = read_pfn(pfn);
+                    pfn_contents.flags.state = MODIFIED;
+                    write_pfn(pfn, pfn_contents);
                 }
             }
-            pte++;
-        }
-        unlock_pte(pte);
-    }
-}
-// No functions get to call this, it must be invoked in its own thread context
-DWORD trim_thread(PVOID context) {
-    // This parameter only exists to satisfy the API requirements for a thread starting function
-    UNREFERENCED_PARAMETER(context);
-
-    // We wait on two handles here in order to react by terminating when the system exits
-    // Or react by waking up and trimming pages if necessary
-    HANDLE handles[2];
-
-    handles[0] = system_exit_event;
-    handles[1] = wake_aging_event;
-
-    // Wait for the system to start before beginning to trim pages
-    WaitForSingleObject(system_start_event, INFINITE);
-    set_trim_status("trimming thread started");
-
-    // This thread infinitely waits to be woken up by other threads until the end of the program
-    while (TRUE)
-    {
-        // Exits the infinite loop if told to, otherwise evaluates whether trimming is needed
-        ULONG index = WaitForMultipleObjects(ARRAYSIZE(handles), handles,
-                                             FALSE, INFINITE);
-        if (index == 0)
-        {
-            set_trim_status("trimming thread exited");
-            break;
+            current_pte++;
         }
 
-        // This is an arbitrary condition that prompts us to trim pages when we need to
-        // In the future we will come up with a new algorithmic approach to doing this
-        while (free_page_list.num_pages + standby_page_list.num_pages <= physical_page_count / 4
-               && free_page_list.num_pages + standby_page_list.num_pages + modified_page_list.num_pages != physical_page_count)
-        {
-            age_pages();
-        }
-    }
-    // This return statement only exists to satisfy the API requirements for a thread starting function
-    return 0;
-}
+        trim_batch_size = batch_list.num_pages;
+        assert(batch_list.num_pages != 0);
 
-DWORD aging_thread(PVOID context)
-{
-    UNREFERENCED_PARAMETER(context);
+        EnterCriticalSection(&modified_page_list.lock);
 
-    HANDLE handles[2];
-    handles[0] = system_exit_event;
-    handles[1] = wake_aging_event;
+        link_list_to_tail(&modified_page_list, &batch_list);
 
-    WaitForSingleObject(system_start_event, INFINITE);
+        LeaveCriticalSection(&modified_page_list.lock);
 
-    while (TRUE)
-    {
-        ULONG index = WaitForMultipleObjects(ARRAYSIZE(handles), handles,
-                                             FALSE, INFINITE);
-        if (index == 0)
-        {
-            break;
+        for (ULONG index = 0; index < PTE_REGION_SIZE; index++) {
+            ULONG frame_number = frame_numbers[index];
+            if (frame_number == 0)
+            {
+                continue;
+            }
+            unlock_pfn(pfn_from_frame_number(frame_number));
         }
 
-        /* Plan for aging pages */
-        // 1. When woken, find the rate pages are leaving the free or standby lists
-        // 2. Estimate a duration until the lists will be empty
-        // 4. Divide the duration by 8 to get 8 increments, one for each age
-        // 5. For each respective increment, divide the 100% of the va space
-        // between the amount of seconds until the next increment
-        // That way, every second a small amount of work will be done
-        // Instead of a large amount of work being done all at once
-        // 6. Do the required passthrough
-        // 7. Sleep until it is time for the next passthrough
-
+        unlock_pte(pte_from_pte_region(region));
+        break;
     }
 
-    return 0;
+    return trim_batch_size;
 }
 
-HANDLE trim_wake_event;
 DWORD trimming_thread(PVOID context)
 {
     UNREFERENCED_PARAMETER(context);
@@ -212,6 +171,7 @@ DWORD trimming_thread(PVOID context)
     handles[1] = trim_wake_event;
 
     WaitForSingleObject(system_start_event, INFINITE);
+    // TODO status
 
     while (TRUE)
     {
@@ -219,18 +179,19 @@ DWORD trimming_thread(PVOID context)
                                              FALSE, INFINITE);
         if (index == 0)
         {
+            // TODO Set status
             break;
         }
 
-        /* Plan for trimming pages */
-        // Batch unmap_pages() calls done in age_pages()
-        // The aging thread now keeps track of the pages it wants to trim instead of directly trimming them
-        // When the amount of pages to trim is greater than a threshold (64, 256, i. e)
-        // Or before the thread goes to sleep
-        // The aging thread wakes up the trimming thread and tells it to trim the specified pages
-        // The trimming thread then trims the pages, batching the unmap_pages() calls
-        // This fixes the problem of contention during unmap calls and speeds up aging dramatically
+        LONG64 num_pages = *(volatile ULONG64 *) (&num_pages_to_trim);
+        ULONG min_age_to_trim = *(volatile ULONG *) (&min_age_to_trim);
 
+        while (num_pages > 0)
+        {
+            ULONG result = trim_pte_region(min_age_to_trim);
+            num_pages -= result;
+        }
     }
+
     return 0;
 }
