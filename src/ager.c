@@ -41,14 +41,6 @@ ULONG64 age_pte_regions(VOID)
             current_pte++;
         }
 
-        // Now we need to update the age counts for the region
-        ULONG64 overflow = region->age_counts[NUMBER_OF_AGES - 1];
-        for (ULONG i = NUMBER_OF_AGES - 1; i > 0; i--) {
-            region->age_counts[i] = region->age_counts[i - 1];
-        }
-        region->age_counts[0] = 0;
-        region->age_counts[NUMBER_OF_AGES - 1] += overflow;
-
         LeaveCriticalSection(&region->lock);
         end_of_region_loop:;
     }

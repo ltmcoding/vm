@@ -283,7 +283,6 @@ VOID page_fault_handler(PVOID arbitrary_va, PFAULT_STATS stats)
     // Update the PTE region
     PPTE_REGION pte_region = pte_region_from_pte(pte);
     // No matter what case we are in, the region has gained an extra active page so we increment the age count
-    pte_region->age_counts[0]++;
 
     if (pte_region->active == 0) {
         pte_region->active = 1;

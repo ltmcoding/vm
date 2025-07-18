@@ -3,58 +3,6 @@
 #include "../include/vm.h"
 #include "../include/debug.h"
 
-// This function puts an individual page on the modified list given its PTE
-void trim(PPTE pte)
-{
-    PPFN pfn;
-    PFN pfn_contents;
-    PTE old_pte_contents;
-    PTE new_pte_contents;
-    PVOID user_va;
-
-    pfn = pfn_from_frame_number(pte->memory_format.frame_number);
-
-    lock_pfn(pfn);
-
-    // If the page is being referenced by the modified writer, we cannot trim it
-    if (pfn->flags.reference == 1) {
-        unlock_pfn(pfn);
-        return;
-    }
-
-    user_va = va_from_pte(pte);
-    NULL_CHECK(user_va, "trim : could not get the va connected to the pte")
-
-    // The user VA is still mapped, we need to unmap it here to stop the user from changing it
-    // Any attempt to modify this va will lead to a page fault so that we will not be able to have stale data
-    unmap_pages(user_va, 1);
-
-    // This writes the new contents into the PTE and PFN
-    old_pte_contents = read_pte(pte);
-    assert(old_pte_contents.memory_format.valid == 1)
-
-    // The PTE is zeroed out here to ensure no stale data remains
-    new_pte_contents.entire_format = 0;
-    new_pte_contents.transition_format.always_zero = 0;
-    new_pte_contents.transition_format.frame_number = old_pte_contents.memory_format.frame_number;
-    new_pte_contents.transition_format.always_zero2 = 0;
-
-    write_pte(pte, new_pte_contents);
-
-    pfn_contents = read_pfn(pfn);
-    pfn_contents.flags.state = MODIFIED;
-    write_pfn(pfn, pfn_contents);
-
-    // Add the page to the modified list
-    EnterCriticalSection(&modified_page_list.lock);
-
-    add_to_list_tail(pfn, &modified_page_list);
-
-    LeaveCriticalSection(&modified_page_list.lock);
-
-    unlock_pfn(pfn);
-}
-
 ULONG trim_pte_region(ULONG min_age_to_trim) {
     PFN_LIST batch_list;
     ULONG trim_batch_size = 0;
@@ -154,6 +102,11 @@ ULONG trim_pte_region(ULONG min_age_to_trim) {
             }
             unlock_pfn(pfn_from_frame_number(frame_number));
         }
+
+        // Add the region back to the list of regions for the oldest age
+        EnterCriticalSection(&pte_region_age_lists[oldest_age].lock);
+        add_region_to_list(region, &pte_region_age_lists[oldest_age]);
+        LeaveCriticalSection(&pte_region_age_lists[oldest_age].lock);
 
         unlock_pte(pte_from_pte_region(region));
         break;

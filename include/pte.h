@@ -51,7 +51,6 @@ typedef struct {
 
 
 typedef struct {
-    ULONG64 age_counts[NUMBER_OF_AGES];
     LIST_ENTRY entry;
     CRITICAL_SECTION lock;
     ULONG active:1;
