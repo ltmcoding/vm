@@ -3,114 +3,166 @@
 #include "../include/vm.h"
 #include "../include/debug.h"
 
-ULONG trim_pte_region(ULONG min_age_to_trim) {
+ULONG trim_pte_region(PULONG pages_to_trim) {
     PFN_LIST batch_list;
     ULONG trim_batch_size = 0;
-    ULONG64 frame_numbers[PTE_REGION_SIZE];
+    PTE_REGION_AGE_COUNT local_count;
+    PVOID virtual_addresses[PTE_REGION_SIZE];
+    PPFN pfn;
+    PPTE_REGION region;
+
+    // Try to find a region to trim
+    LONG age = NUMBER_OF_AGES - 1;
+    while (age >= 0) {
+        EnterCriticalSection(&pte_region_age_lists[age].lock);
+        region = pop_region_from_list(&pte_region_age_lists[age]);
+        LeaveCriticalSection(&pte_region_age_lists[age].lock);
+
+        if (region != NULL) {
+            age--;
+        }
+    }
+
+    // No regions to trim, return 0
+    if (region == NULL) {
+        return trim_batch_size;
+    }
+
 
     initialize_listhead(&batch_list);
 
-    for (LONG64 age = NUMBER_OF_AGES - 1; age >= 0; age--) {
-        PPTE_REGION_LIST listhead = &pte_region_age_lists[age];
-        EnterCriticalSection(&listhead->lock);
-
-        // Try to pop a region from the list. If we succesfully can it comes with the lock held
-        PPTE_REGION region = pop_region_from_list(listhead);
-        if (region == NULL) {
-            LeaveCriticalSection(&listhead->lock);
-            continue;
+    // Grab the first PTE in the region
+    PPTE current_pte = pte_from_pte_region(region);
+    for (ULONG index = 0; index < PTE_REGION_SIZE; index++) {
+        // Break early if we reach the end of the PTEs
+        if (current_pte == pte_end)
+        {
+            break;
         }
-        LeaveCriticalSection(&listhead->lock);
-
-        // Grab the first PTE in the region
-        PPTE current_pte = pte_from_pte_region(region);
-        ULONG oldest_age = 0;
-        PPFN pfn;
-
-        for (ULONG index = 0; index < PTE_REGION_SIZE; index++) {
-            // Break early if we reach the end of the PTEs
-            if (current_pte == pte_end)
-            {
-                break;
-            }
-            // Check the valid bit of the PTE
-            if (current_pte->memory_format.valid == 1) {
-                // If the page is not old enough, we skip it after noting its age
-                if (current_pte->memory_format.age < min_age_to_trim) {
-
-                    if (current_pte->memory_format.age > oldest_age) {
-                        oldest_age = current_pte->memory_format.age;
-                    }
-                }
-                // If the page is older than the minimum age, we trim it
-                else {
-                    pfn = pfn_from_frame_number(current_pte->memory_format.frame_number);
-                    lock_pfn(pfn);
-
-                    // If the page is being referenced by the modified writer, we cannot trim it
-                    if (pfn->flags.reference == 1) {
-                        unlock_pfn(pfn);
-                        current_pte++;
-                        continue;
-                    }
-
-                    add_to_list_head(pfn, &batch_list);
-                    frame_numbers[index] = current_pte->memory_format.frame_number;
-
-                    PVOID user_va = va_from_pte(current_pte);
-                    NULL_CHECK(user_va, "trim : could not get the va connected to the pte")
-
-                    // The user VA is still mapped, we need to unmap it here to stop the user from changing it
-                    // Any attempt to modify this va will lead to a page fault so that we will not be able to have stale data
-                    unmap_pages(user_va, 1);
-
-                    // This writes the new contents into the PTE and PFN
-                    PTE old_pte_contents = read_pte(current_pte);
-                    assert(old_pte_contents.memory_format.valid == 1)
-
-                    PTE new_pte_contents;
-                    // The PTE is zeroed out here to ensure no stale data remains
-                    new_pte_contents.entire_format = 0;
-                    new_pte_contents.transition_format.always_zero = 0;
-                    new_pte_contents.transition_format.frame_number = old_pte_contents.memory_format.frame_number;
-                    new_pte_contents.transition_format.always_zero2 = 0;
-
-                    write_pte(current_pte, new_pte_contents);
-
-                    PFN pfn_contents = read_pfn(pfn);
-                    pfn_contents.flags.state = MODIFIED;
-                    write_pfn(pfn, pfn_contents);
-                }
-            }
-            current_pte++;
-        }
-
-        trim_batch_size = batch_list.num_pages;
-        assert(batch_list.num_pages != 0);
-
-        EnterCriticalSection(&modified_page_list.lock);
-
-        link_list_to_tail(&modified_page_list, &batch_list);
-
-        LeaveCriticalSection(&modified_page_list.lock);
-
-        for (ULONG index = 0; index < PTE_REGION_SIZE; index++) {
-            ULONG frame_number = frame_numbers[index];
-            if (frame_number == 0)
-            {
+        // Check the valid bit of the PTE
+        if (current_pte->memory_format.valid == 1) {
+            if (current_pte->memory_format.accessed == 1) {
+                // If the PTE is accessed, we reset its age
+                PTE local = read_pte(current_pte);
+                local.memory_format.age = 0;
+                write_pte(current_pte, local);
+                increase_age_count(&local_count, 0);
+                current_pte++;
                 continue;
             }
-            unlock_pfn(pfn_from_frame_number(frame_number));
+            // If the thread is allowed to trim this PTE, we will do so
+            if (pages_to_trim[current_pte->memory_format.age] > 0) {
+                pfn = pfn_from_frame_number(current_pte->memory_format.frame_number);
+                lock_pfn(pfn);
+
+                // If the page is being referenced by the modified writer, we cannot trim it
+                if (pfn->flags.reference == 1) {
+                    unlock_pfn(pfn);
+                    // We want to still count the PTE for the age that it is in
+                    increase_age_count(&local_count, current_pte->memory_format.age);
+                    current_pte++;
+                    continue;
+                }
+
+                // Add it to the list of pages to unmap and trim
+                add_to_list_head(pfn, &batch_list);
+                virtual_addresses[trim_batch_size] = va_from_pte(current_pte);
+                NULL_CHECK(virtual_addresses[trim_batch_size], "trim : could not get the va connected to the pte")
+                trim_batch_size++;
+
+            }
+            // Otherwise, it stays active, and the thread needs to recount its age for the PTE region
+            else {
+                increase_age_count(&local_count, current_pte->memory_format.age);
+            }
+        }
+        current_pte++;
+    }
+
+    assert(trim_batch_size = batch_list.num_pages)
+    // If we did not trim any pages, we can skip the rest of the processing and break out
+    // We only expect this to happen in edge cases where the ages of every trimmable page in the region
+    // Are reset by memory accesses
+    if (trim_batch_size == 0) {
+        region->age_count = local_count;
+        // Find the oldest age to insert the region back into the age lists
+        // Set oldest age to a value that is larger than any possible age
+        // If it stays that way, it means that no active pages remain in the region
+        ULONG oldest_age = NUMBER_OF_AGES + 1;
+        for (ULONG i = 0; i < NUMBER_OF_AGES; i++) {
+            if (local_count.ages[i] != 0) {
+                oldest_age = i;
+            }
         }
 
-        // Add the region back to the list of regions for the oldest age
-        EnterCriticalSection(&pte_region_age_lists[oldest_age].lock);
-        add_region_to_list(region, &pte_region_age_lists[oldest_age]);
-        LeaveCriticalSection(&pte_region_age_lists[oldest_age].lock);
+        // If there are no active pages left in the region, we can make it inactive, unlock, and break
+        if (oldest_age == NUMBER_OF_AGES + 1) {
+            make_region_inactive(region);
+            unlock_pte_region(region);
+            return trim_batch_size;
+        }
 
-        unlock_pte(pte_from_pte_region(region));
-        break;
+        PPTE_REGION_LIST new_listhead = &pte_region_age_lists[oldest_age];
+
+        EnterCriticalSection(&new_listhead->lock);
+        add_region_to_list(region, new_listhead);
+        LeaveCriticalSection(&new_listhead->lock);
+
+        unlock_pte_region(region);
+        return trim_batch_size;
     }
+
+    // Unmap the pages with the Windows API
+    unmap_pages_scatter(virtual_addresses, trim_batch_size);
+
+    EnterCriticalSection(&modified_page_list.lock);
+
+    link_list_to_tail(&modified_page_list, &batch_list);
+
+    LeaveCriticalSection(&modified_page_list.lock);
+
+    // Iterate over each PFN we captured and change its state along with its PTE
+    PLIST_ENTRY current_entry = batch_list.entry.Flink;
+    while (current_entry != &batch_list.entry)
+    {
+        pfn = CONTAINING_RECORD(current_entry, PFN, entry);
+        current_pte = pfn->pte;
+
+        // Zero the valid bit and make the PTE a transition PTE
+        PTE pte_contents = read_pte(current_pte);
+        pte_contents.entire_format = 0;
+        pte_contents.transition_format.always_zero = 0;
+        pte_contents.transition_format.frame_number = frame_number_from_pfn(pfn);
+        pte_contents.transition_format.always_zero2 = 0;
+        write_pte(current_pte, pte_contents);
+
+        // Update the PFN to make it modified
+        PFN pfn_contents = read_pfn(pfn);
+        pfn_contents.flags.state = MODIFIED;
+        write_pfn(pfn, pfn_contents);
+
+        // Unlock the PFN
+        unlock_pfn(pfn);
+
+        current_entry = current_entry->Flink;
+    }
+
+    region->age_count = local_count;
+    // Find the oldest age to insert the region back into the age lists
+    ULONG oldest_age = 0;
+    for (ULONG i = 0; i < NUMBER_OF_AGES; i++) {
+        if (local_count.ages[i] != 0) {
+            oldest_age = i;
+        }
+    }
+    // If the
+    PPTE_REGION_LIST new_listhead = &pte_region_age_lists[oldest_age];
+
+    EnterCriticalSection(&new_listhead->lock);
+    add_region_to_list(region, new_listhead);
+    LeaveCriticalSection(&new_listhead->lock);
+
+    unlock_pte_region(region);
 
     return trim_batch_size;
 }
@@ -136,13 +188,31 @@ DWORD trimming_thread(PVOID context)
             break;
         }
 
-        LONG64 num_pages = *(volatile ULONG64 *) (&num_pages_to_trim);
-        ULONG min_age_to_trim = *(volatile ULONG *) (&min_age_to_trim);
+        // Get the target number of pages to trim for each age and copy it to a local array
+        ULONG64 local_num_pages_to_trim[NUMBER_OF_AGES];
+        PULONG64 remote_list = (volatile PULONG64) num_pages_to_trim;
+        memcpy(local_num_pages_to_trim, remote_list, 8 * sizeof(ULONG64));
 
-        while (num_pages > 0)
+        // Trim as many pages as the thread was told to
+        BOOLEAN done_trimming = FALSE;
+        while (!done_trimming)
         {
-            ULONG result = trim_pte_region(min_age_to_trim);
-            num_pages -= result;
+            // Temperarily set done trimming to true, we will set it to false if we have more work to do
+            done_trimming = TRUE;
+            for (ULONG age = 0; age < NUMBER_OF_AGES; age++)
+            {
+                // If there are pages of any age left to trim, we will keep trimming
+                if (local_num_pages_to_trim[age] != 0) {
+                    done_trimming = FALSE;
+                }
+            }
+
+            // If we are done trimming, we can break out of the loop
+            if (done_trimming) {
+                break;
+            }
+
+            trim_pte_region(*local_num_pages_to_trim);
         }
     }
 

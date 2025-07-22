@@ -97,40 +97,11 @@ VOID full_virtual_memory_test(VOID) {
             // Write the virtual address into each page
             page_faulted = FALSE;
             // Try to access the virtual address, continue entering the handler until the page fault is resolved
-            do {
-                __try
-                {
-                    // Here we read the value of the page contents associated with the VA
-                    local = *arbitrary_va;
-                    // This causes an error if the local value is not the same as the VA
-                    // This means that we mixed up page contents between different VAs
-                    if (local != 0) {
-                        if (local != (ULONG_PTR) arbitrary_va) {
-                            fatal_error("full_virtual_memory_test : page contents are not the same as the VA");
-                        }
-                        stats->num_reaccesses++;
-                    } else {
-                        stats->num_first_accesses++;
-                    }
 
-                    // We are trying to write the VA as a number into the page contents associated with that VA
-                    if ((PULONG_PTR) local != arbitrary_va) {
-                        *arbitrary_va = (ULONG_PTR) arbitrary_va;
-                    }
-
-                    page_faulted = FALSE;
-                }
-                __except(EXCEPTION_EXECUTE_HANDLER)
-                {
-                    page_faulted = TRUE;
-                }
-
-                // We call the page fault handler no matter what
-                // This is because we want to reset the age of a PTE when its VA is accessed
-                // This is done in the handler, as is referred to in this program as a fake fault
-                page_fault_handler(arbitrary_va, stats);
-
-            } while (page_faulted == TRUE);
+            // Call the API function to try accessing the virtual address
+            // This function simulates the CPU's actions of calling the page fault handler,
+            // stamping accessed bits, resetting ages, abd retrying if the fault wasn't resolved.
+            access_va(arbitrary_va);
         }
     }
 

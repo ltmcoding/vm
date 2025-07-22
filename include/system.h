@@ -37,5 +37,7 @@ extern VOID deinitialize_system(VOID);
 extern VOID fatal_error(char *msg);
 extern VOID map_pages(PVOID user_va, ULONG_PTR page_count, PULONG_PTR page_array);
 extern VOID unmap_pages(PVOID user_va, ULONG_PTR page_count);
+extern VOID map_pages_scatter(PVOID *user_va, ULONG_PTR page_count, PULONG_PTR page_array);
+extern VOID unmap_pages_scatter(PVOID *user_va, ULONG_PTR page_count);
 
 #endif //VM_SYSTEM_H

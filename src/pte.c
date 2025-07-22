@@ -236,3 +236,47 @@ PPTE_REGION pop_region_from_list(PPTE_REGION_LIST listhead) {
     remove_region_from_list(pte_region, listhead);
     return pte_region;
 }
+
+BOOLEAN is_region_active(PPTE_REGION pte_region) {
+    // This checks if the region is active
+    return pte_region->active == 1;
+}
+
+VOID make_region_active(PPTE_REGION pte_region) {
+    // This makes the region active
+    pte_region->active = 1;
+}
+
+VOID make_region_inactive(PPTE_REGION pte_region) {
+    // This makes the region inactive
+    pte_region->active = 0;
+}
+
+VOID lock_pte_region(PPTE_REGION pte_region) {
+    EnterCriticalSection(&pte_region->lock);
+}
+
+BOOLEAN try_lock_pte_region(PPTE_REGION pte_region) {
+    return TryEnterCriticalSection(&pte_region->lock);
+}
+
+VOID unlock_pte_region(PPTE_REGION pte_region) {
+    LeaveCriticalSection(&pte_region->lock);
+}
+
+VOID increase_age_count(PPTE_REGION_AGE_COUNT age_count, ULONG age) {
+    // This increases the age count for the given age
+    if (age >= NUMBER_OF_AGES) {
+        fatal_error("increase_age_count : age is out of valid range");
+    }
+    age_count->ages[age]++;
+}
+
+// TODO replace this with a bitmap that uses interlocked
+PPTE_REGION get_next_active_region(PPTE_REGION pte_region) {
+    do {
+        pte_region++;
+    } while (pte_region->active == 0);
+
+    return pte_region;
+}

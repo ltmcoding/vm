@@ -14,6 +14,7 @@
 // We know that a PTE is in valid format if the valid bit is set
 typedef struct {
     ULONG64 valid:1;
+    ULONG64 accessed:1;
     ULONG64 frame_number:40;
     ULONG64 age:BITS_PER_AGE;
 } VALID_PTE /*, *PVALID_PTE*/;
@@ -44,15 +45,19 @@ typedef struct {
 } PTE, *PPTE;
 
 typedef struct {
+    USHORT ages[NUMBER_OF_AGES];
+} PTE_REGION_AGE_COUNT, *PPTE_REGION_AGE_COUNT;
+
+typedef struct {
     LIST_ENTRY entry;
     ULONG64 num_regions;
     CRITICAL_SECTION lock;
 } PTE_REGION_LIST, *PPTE_REGION_LIST;
 
-
 typedef struct {
     LIST_ENTRY entry;
     CRITICAL_SECTION lock;
+    PTE_REGION_AGE_COUNT age_count;
     ULONG active:1;
 } PTE_REGION, *PPTE_REGION;
 
@@ -79,5 +84,14 @@ extern VOID initialize_region_listhead(PPTE_REGION_LIST listhead);
 extern VOID add_region_to_list(PPTE_REGION pte_region, PPTE_REGION_LIST listhead);
 extern VOID remove_region_from_list(PPTE_REGION pte_region, PPTE_REGION_LIST listhead);
 extern PPTE_REGION pop_region_from_list(PPTE_REGION_LIST listhead);
+
+extern BOOLEAN is_region_active(PPTE_REGION pte_region);
+extern VOID make_region_active(PPTE_REGION pte_region);
+extern VOID make_region_inactive(PPTE_REGION pte_region);
+extern VOID lock_pte_region(PPTE_REGION pte_region);
+extern BOOLEAN try_lock_pte_region(PPTE_REGION pte_region);
+extern VOID unlock_pte_region(PPTE_REGION pte_region);
+extern VOID increase_age_count(PPTE_REGION_AGE_COUNT age_count, ULONG age);
+extern PPTE_REGION get_next_active_region(PPTE_REGION pte_region);
 
 #endif //VM_PTE_H

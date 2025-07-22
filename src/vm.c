@@ -44,6 +44,22 @@ VOID unmap_pages(PVOID virtual_address, ULONG_PTR num_pages)
     }
 }
 
+VOID map_pages_scatter(PVOID *virtual_addresses, ULONG_PTR num_pages, PULONG_PTR page_array)
+{
+    if (MapUserPhysicalPagesScatter(virtual_addresses, num_pages, page_array) == FALSE) {
+        printf("map_pages_scatter : could not map VA %p to page %llX\n", virtual_addresses[0], page_array[0]);
+        fatal_error(NULL);
+    }
+}
+
+VOID unmap_pages_scatter(PVOID *virtual_addresses, ULONG_PTR num_pages)
+{
+    if (MapUserPhysicalPagesScatter(virtual_addresses, num_pages, NULL) == FALSE) {
+        printf("unmap_pages_scatter : could not unmap VA %p to page %llX\n", virtual_addresses[0], num_pages);
+        fatal_error(NULL);
+    }
+}
+
 // This is how we get pages for new virtual addresses as well as old ones only exist on the paging file
 PPFN get_free_page(VOID) {
     PPFN free_page = NULL;
@@ -131,8 +147,39 @@ PPFN read_page_on_disc(PPTE pte, PPFN free_page)
     return free_page;
 }
 
+// Stamp the accessed bit in the corresponding PTE when a VA is accessed
+// In real life, this would be done by the CPU automatically
+// However my program needs to simulate it
+VOID cpu_stamp(PVOID arbitrary_va) {
+    PPTE pte = pte_from_va(arbitrary_va);
+    NULL_CHECK(pte, "cpu_stamp : could not get pte from va")
+
+    // If the page is valid, we update its age using interlocked
+    BOOLEAN success = FALSE;
+    PTE old_pte_contents;
+    PTE new_contents;
+    while (!success) {
+        old_pte_contents = read_pte(pte);
+        // If the page is not valid, we cannot update its age
+        if (old_pte_contents.memory_format.valid == 0) {
+            return;
+        }
+        // If the accessed bit is already set and the age is 0, we do not need to update it
+        if (old_pte_contents.memory_format.accessed == 1 && old_pte_contents.memory_format.age == 0) {
+            return;
+        }
+        new_contents = old_pte_contents;
+        new_contents.memory_format.accessed = 1;
+        new_contents.memory_format.age = 0;
+
+        // Try to write with an interlocked compare exchange
+        success = InterlockedCompareExchange64((volatile LONG64 *) &pte->entire_format,
+            new_contents.entire_format, old_pte_contents.entire_format) == old_pte_contents.entire_format;
+    }
+}
+
 // This is where we handle any access or fault of a page
-VOID page_fault_handler(PVOID arbitrary_va, PFAULT_STATS stats)
+VOID page_fault_handler(PVOID arbitrary_va)
 {
     PPTE pte;
     PTE pte_contents;
@@ -159,25 +206,8 @@ VOID page_fault_handler(PVOID arbitrary_va, PFAULT_STATS stats)
     // We know this page is active because its valid bit is set, which only exists in a memory format pte
     if (pte_contents.memory_format.valid == 1)
     {
-        stats->num_fake_faults++;
-        // We do this check to avoid a pte write
-        if (pte_contents.memory_format.age == 0)
-        {
-            unlock_pte(pte);
-            return;
-        }
-
-        pte_contents.memory_format.age = 0;
-        write_pte(pte, pte_contents);
-
-        // TODO the ages lists could be corrupted here. We need to fix this and think of a better solution
-
-        unlock_pte(pte);
         return;
     }
-
-    // At this point, we know that the page actually faulted
-    stats->num_faults++;
 
     // If the entre pte is zeroed, it means that this is a brand new va that has never been accessed.
     // Technically, we only need to know that on_disc and the field at the position of
@@ -282,10 +312,10 @@ VOID page_fault_handler(PVOID arbitrary_va, PFAULT_STATS stats)
 
     // Update the PTE region
     PPTE_REGION pte_region = pte_region_from_pte(pte);
-    // No matter what case we are in, the region has gained an extra active page so we increment the age count
 
-    if (pte_region->active == 0) {
-        pte_region->active = 1;
+    // No matter what case we are in, the region has gained an extra active page so we increment the age count
+    if (!is_region_active(pte_region)) {
+        make_region_active(pte_region);
         EnterCriticalSection(&pte_region_age_lists[0].lock);
         add_region_to_list(pte_region, &pte_region_age_lists[0]);
         LeaveCriticalSection(&pte_region_age_lists[0].lock);
@@ -306,6 +336,42 @@ PVOID allocate_memory(PULONG_PTR num_bytes)
 {
     *num_bytes = virtual_address_size;
     return va_base;
+}
+
+// Accesses a virtual address and checks its checksum
+// Enters the page fault handler if a page fault occurs and simulates the CPU stamping the accessed bit
+VOID access_va(PULONG_PTR arbitrary_va) {
+    BOOLEAN page_faulted = FALSE;
+    ULONG_PTR local;
+
+    do {
+        __try
+        {
+            // Here we read the value of the page contents associated with the VA
+            local = *arbitrary_va;
+            // Here we need to simulate our CPU stamping the page's accessed bit
+            cpu_stamp(arbitrary_va);
+
+            // This causes an error if the local value is not the same as the VA
+            // This means that we mixed up page contents between different VAs
+            if (local != 0) {
+                if (local != (ULONG_PTR) arbitrary_va) {
+                    fatal_error("full_virtual_memory_test : page contents are not the same as the VA");
+                }
+            } else {
+                // We are trying to write the VA as a number into the page contents associated with that VA
+                *arbitrary_va = (ULONG_PTR) arbitrary_va;
+            }
+
+            page_faulted = FALSE;
+        }
+        __except(EXCEPTION_EXECUTE_HANDLER)
+        {
+            page_faulted = TRUE;
+            page_fault_handler(arbitrary_va);
+        }
+
+    } while (page_faulted == TRUE);
 }
 
 // This main is likely to be moved to userapp.c in the future
