@@ -3,6 +3,7 @@
 #include "../include/vm.h"
 #include "../include/debug.h"
 
+// TODO what if there are no age 8s left so we exit early but there are age 7s
 ULONG trim_pte_region(PULONG pages_to_trim) {
     PFN_LIST batch_list;
     ULONG trim_batch_size = 0;
@@ -11,6 +12,9 @@ ULONG trim_pte_region(PULONG pages_to_trim) {
     PPFN pfn;
     PPTE_REGION region;
 
+    TIME_COUNTER time_counter;
+    start_counter(&time_counter);
+
     // Try to find a region to trim
     LONG age = NUMBER_OF_AGES - 1;
     while (age >= 0) {
@@ -18,9 +22,11 @@ ULONG trim_pte_region(PULONG pages_to_trim) {
         region = pop_region_from_list(&pte_region_age_lists[age]);
         LeaveCriticalSection(&pte_region_age_lists[age].lock);
 
-        if (region != NULL) {
+        if (region == NULL) {
             age--;
+            continue;
         }
+        break;
     }
 
     // No regions to trim, return 0
@@ -109,6 +115,12 @@ ULONG trim_pte_region(PULONG pages_to_trim) {
         LeaveCriticalSection(&new_listhead->lock);
 
         unlock_pte_region(region);
+
+        stop_counter(&time_counter);
+        DOUBLE duration = get_counter_duration(&time_counter);
+        track_time(duration, trim_batch_size, trim_times,
+                  &trim_time_index, TRIM_TIMES_TO_TRACK);
+
         return trim_batch_size;
     }
 
@@ -175,6 +187,7 @@ DWORD trimming_thread(PVOID context)
     handles[0] = system_exit_event;
     handles[1] = trim_wake_event;
 
+    PULONG local_num_pages_to_trim = malloc(NUMBER_OF_AGES * sizeof(ULONG64));
     WaitForSingleObject(system_start_event, INFINITE);
     // TODO status
 
@@ -185,34 +198,19 @@ DWORD trimming_thread(PVOID context)
         if (index == 0)
         {
             // TODO Set status
+            free(local_num_pages_to_trim);
             break;
         }
 
         // Get the target number of pages to trim for each age and copy it to a local array
-        ULONG64 local_num_pages_to_trim[NUMBER_OF_AGES];
-        PULONG64 remote_list = (volatile PULONG64) num_pages_to_trim;
-        memcpy(local_num_pages_to_trim, remote_list, 8 * sizeof(ULONG64));
+        PULONG64 remote_list = (volatile PULONG64) ages_to_trim;
+        memcpy(local_num_pages_to_trim, remote_list, NUMBER_OF_AGES * sizeof(ULONG64));
 
-        // Trim as many pages as the thread was told to
-        BOOLEAN done_trimming = FALSE;
-        while (!done_trimming)
-        {
-            // Temperarily set done trimming to true, we will set it to false if we have more work to do
-            done_trimming = TRUE;
-            for (ULONG age = 0; age < NUMBER_OF_AGES; age++)
-            {
-                // If there are pages of any age left to trim, we will keep trimming
-                if (local_num_pages_to_trim[age] != 0) {
-                    done_trimming = FALSE;
-                }
-            }
+        ULONG64 local_batches = *(volatile ULONG64 *) (&num_trim_batches);
 
-            // If we are done trimming, we can break out of the loop
-            if (done_trimming) {
-                break;
-            }
-
-            trim_pte_region(*local_num_pages_to_trim);
+        // Trim as many batches as the thread was told to
+        for (ULONG64 i = 0; i < local_batches; i++) {
+            trim_pte_region(local_num_pages_to_trim);
         }
     }
 

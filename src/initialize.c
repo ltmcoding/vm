@@ -24,10 +24,9 @@ PULONG system_thread_ids;
 HANDLE physical_page_handle;
 
 // These are handles to our events, which are used to signal between threads
-HANDLE wake_aging_event;
-HANDLE modified_writing_event;
 HANDLE pages_available_event;
 HANDLE disc_spot_available_event;
+
 HANDLE system_exit_event;
 HANDLE system_start_event;
 
@@ -113,11 +112,14 @@ VOID initialize_events(VOID)
 {
     set_initialize_status("initialize_system", "setting up events");
     // Synchronization Events
-    wake_aging_event = CreateEvent(NULL, FALSE, FALSE, NULL);
-    NULL_CHECK(wake_aging_event, "initialize_events : could not initialize wake_aging_event")
+    mw_wake_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    NULL_CHECK(mw_wake_event, "initialize_events : could not initialize modified_writing_event")
 
-    modified_writing_event = CreateEvent(NULL, FALSE, FALSE, NULL);
-    NULL_CHECK(modified_writing_event, "initialize_events : could not initialize modified_writing_event")
+    age_wake_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    NULL_CHECK(age_wake_event, "initialize_events : could not initialize age_wake_event")
+
+    trim_wake_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+    NULL_CHECK(trim_wake_event, "initialize_events : could not initialize trim_wake_event")
 
     pages_available_event = CreateEvent(NULL, FALSE, FALSE, NULL);
     NULL_CHECK(pages_available_event, "initialize_events : could not initialize pages_available_event")
@@ -169,8 +171,8 @@ VOID initialize_threads(VOID)
     NULL_CHECK(system_thread_ids, "initialize_threads : could not allocate memory for system_thread_ids")
 
     system_handles[0] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)
-    trim_thread,(LPVOID) (ULONG_PTR) 0, 0, &system_thread_ids[0]);
-    NULL_CHECK(system_handles[0], "initialize_threads : could not initialize thread handle for trim_thread")
+    trimming_thread,(LPVOID) (ULONG_PTR) 0, 0, &system_thread_ids[0]);
+    NULL_CHECK(system_handles[0], "initialize_threads : could not initialize thread handle for trimming_thread")
 
     system_handles[1] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)
     modified_write_thread,(LPVOID) (ULONG_PTR) 1, 0, &system_thread_ids[1]);
@@ -179,6 +181,10 @@ VOID initialize_threads(VOID)
     system_handles[2] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)
     task_scheduling_thread,(LPVOID) (ULONG_PTR) 2, 0, &system_thread_ids[2]);
     NULL_CHECK(system_handles[2], "initialize_threads : could not initialize thread handle for task_scheduling_thread")
+
+    system_handles[3] = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)
+    aging_thread,(LPVOID) (ULONG_PTR) 3, 0, &system_thread_ids[3]);
+    NULL_CHECK(system_handles[3], "initialize_threads : could not initialize thread handle for aging_thread");
 }
 
 
@@ -338,12 +344,14 @@ VOID initialize_user_va_space(VOID)
     //va__end = va_base + virtual_address_size;
 }
 
-VOID initialie_pte_regions(VOID) {
+VOID initialize_pte_regions(VOID) {
     // Initialize the locks for the PTE regions
     // Add PTE_REGION_SIZE - 1 to virtual_address_size to round up in case of an uneven division
-    ULONG64 num_pte_regions = (virtual_address_size + PTE_REGION_SIZE - 1) / PTE_REGION_SIZE;
-    pte_regions = malloc(num_pte_regions * sizeof(PTE));
-    NULL_CHECK(pte_regions, "initialie_pte_regions : could not allocate memory for pte regions");
+    ULONG64 num_pte_regions = (virtual_address_size + PTE_REGION_SIZE - 1) / PTE_REGION_COVERAGE_IN_BYTES;
+    pte_regions = malloc(num_pte_regions * sizeof(PTE_REGION));
+    pte_regions_end = pte_regions + num_pte_regions;
+    NULL_CHECK(pte_regions, "initialize_pte_regions : could not allocate memory for pte regions");
+    memset(pte_regions, 0, num_pte_regions * sizeof(PTE_REGION));
 
     for (ULONG64 i = 0; i < num_pte_regions; i++) {
         // No need to update age counts as this only applies to active pages
@@ -351,13 +359,18 @@ VOID initialie_pte_regions(VOID) {
         InitializeCriticalSection(&pte_regions[i].lock);
     }
 
-    pte_region_age_lists = malloc(num_pte_regions * sizeof(PTE));
-    NULL_CHECK(pte_region_age_lists, "initialie_pte_regions : could not allocate memory for pte region age lists");
-    for (ULONG64 i = 0; i < num_pte_regions; i++) {
+    pte_region_age_lists = malloc(NUMBER_OF_AGES * sizeof(PTE_REGION_LIST));
+    NULL_CHECK(pte_region_age_lists, "initialize_pte_regions : could not allocate memory for pte region age lists");
+    memset(pte_region_age_lists, 0, NUMBER_OF_AGES * sizeof(PTE_REGION_LIST));
+    for (ULONG64 i = 0; i < NUMBER_OF_AGES; i++) {
         // Initialize the list head for the PTE region
         initialize_region_listhead(&pte_region_age_lists[i]);
-        pte_region_age_lists[i].num_regions = 0;
         InitializeCriticalSection(&pte_region_age_lists[i].lock);
+    }
+
+    if (pte_regions == NULL || pte_region_age_lists == NULL) {
+        printf("initialize_pte_regions : could not allocate memory for pte regions or age lists\n");
+        DebugBreak();
     }
 }
 
@@ -500,15 +513,17 @@ VOID initialize_pages()
 
 }
 
-// VOID initialize_accessed_va_map(VOID)
-// {
-//     ULONG64 virtual_address_size_in_pages = virtual_address_size / PAGE_SIZE;
-//
-//     PBOOLEAN va_accessed_map = (PBOOLEAN) malloc(virtual_address_size_in_pages * sizeof(BOOLEAN));
-//
-//     NULL_CHECK(va_accessed_map, "initialize_accessed_va_map : could not allocate memory for va accessed map")
-//     memset(va_accessed_map, 0, virtual_address_size_in_pages * sizeof(BOOLEAN));
-// }
+VOID initialize_time_measures(VOID) {
+    // Fill the first entries of the time measures with sample data
+    track_time(0.010, MAX_MOD_BATCH, mod_write_times,
+               &mod_write_time_index, MOD_WRITE_TIMES_TO_TRACK);
+
+    track_time(0.001, PTE_REGION_SIZE, trim_times,
+               &trim_time_index, TRIM_TIMES_TO_TRACK);
+
+    track_time(0.001, PTE_REGION_SIZE, age_times,
+               &age_time_index, AGE_TIMES_TO_TRACK);
+}
 
 void initialize_console(void) {
     InitializeCriticalSection(&console_lock);
@@ -565,6 +580,10 @@ VOID initialize_system (VOID) {
     initialize_system_va_space();
 
     initialize_pte_metadata();
+
+    initialize_pte_regions();
+
+    initialize_time_measures();
 
     set_initialize_status("initialize_system", "system successfully initialized, running tests");
 

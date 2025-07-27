@@ -4,6 +4,7 @@
 
 // This number is strategically chosen to be 512, as it corresponds to the number of entries in a page table
 #define PTE_REGION_SIZE                          (ULONG64) 512
+#define PTE_REGION_COVERAGE_IN_BYTES             (PTE_REGION_SIZE * sizeof(PTE))
 
 #define NUMBER_OF_AGES                           (ULONG64) 8
 #define BITS_PER_AGE                             (ULONG64) 3
@@ -65,6 +66,7 @@ extern PPTE pte_base;
 extern PPTE pte_end;
 
 extern PPTE_REGION pte_regions;
+extern PPTE_REGION pte_regions_end;
 
 extern PPTE_REGION_LIST pte_region_age_lists;
 
@@ -79,6 +81,7 @@ extern BOOLEAN try_lock_pte(PPTE pte);
 
 extern PTE read_pte(PPTE pte);
 extern VOID write_pte(PPTE pte, PTE pte_contents);
+extern BOOLEAN interlocked_write_pte(PPTE pte, PTE local);
 
 extern VOID initialize_region_listhead(PPTE_REGION_LIST listhead);
 extern VOID add_region_to_list(PPTE_REGION pte_region, PPTE_REGION_LIST listhead);

@@ -6,8 +6,9 @@ PPTE pte_base;
 PPTE pte_end;
 
 PPTE_REGION pte_regions;
+PPTE_REGION pte_regions_end;
 
-PPTE_REGION_AGE_CHAIN pte_region_age_chains[NUMBER_OF_AGES];
+PPTE_REGION_LIST pte_region_age_lists;
 
 
 // These functions convert between matching linear structures (pte and va)
@@ -100,33 +101,24 @@ VOID write_pte(PPTE pte, PTE local)
     // This is needed because the cpu or another concurrent faulting thread
     // Can still access this pte in transition format and see an intermediate state
     *(volatile ULONG64 *) &pte->entire_format = local.entire_format;
-    if (local.entire_format == 0)
-    {
-        // The PTE is free
-    }
-    else if (local.memory_format.valid == 1)
-    {
-        // The PTE is valid
-        if (local.memory_format.frame_number > highest_frame_number)
-        {
-            fatal_error("write_pte : frame number is out of valid range");
-        }
-    }
-    else if (local.disc_format.on_disc == 1)
-    {
-        // The PTE is on disc
-    }
-    else
-    {
-        if (local.transition_format.frame_number > highest_frame_number)
-        {
-            fatal_error("write_pte : frame number is out of valid range");
-        }
-    }
 
 #if READWRITE_LOGGING
     log_access(IS_A_PTE, pte, WRITE);
 #endif
+}
+
+BOOLEAN interlocked_write_pte(PPTE pte, PTE local) {
+    ULONG64 result = InterlockedCompareExchange64(
+        (volatile LONG64 *) &pte->entire_format,
+        local.entire_format,
+        read_pte(pte).entire_format
+    );
+
+    if (result == read_pte(pte).entire_format) {
+        return TRUE;
+    }
+
+    return FALSE;
 }
 
 // Functions to lock and unlock PTE regions

@@ -76,7 +76,6 @@ PPFN get_free_page(VOID) {
     {
         free_page = pop_from_list_head(&standby_page_list);
         if (free_page == NULL) {
-            SetEvent(wake_aging_event);
             return NULL;
         }
 
@@ -116,7 +115,6 @@ PPFN get_free_page(VOID) {
     // We wake the aging thread and send this information to the fault handler
     // Which then waits on a page to become available
     // Aging is done here no matter what
-    SetEvent(wake_aging_event);
     // Once we have depleted a page from the free/standby list, it is a good idea to consider aging
     return free_page;
 }
@@ -321,6 +319,9 @@ VOID page_fault_handler(PVOID arbitrary_va)
         LeaveCriticalSection(&pte_region_age_lists[0].lock);
     }
 
+    // Increment the age count for the region. We know that the age is 0
+    pte_region->age_count.ages[0]++;
+
     // This is a Windows API call that confirms the changes we made with the OS
     // We have already mapped this va to this page on our side, but the OS also needs to do the same on its side
     // This is necessary as this is a user mode program
@@ -399,8 +400,6 @@ int main (int argc, char** argv)
     initialize_system();
 
     run_system();
-
-    //print_va_access_rate();
 
     deinitialize_system();
 

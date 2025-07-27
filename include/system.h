@@ -21,14 +21,15 @@ extern CRITICAL_SECTION modified_read_va_lock;
 extern CRITICAL_SECTION repurpose_zero_va_lock;
 
 extern HANDLE wake_aging_event;
-extern HANDLE modified_writing_event;
+extern HANDLE mw_wake_event;
 extern HANDLE pages_available_event;
 extern HANDLE disc_spot_available_event;
 extern HANDLE system_exit_event;
 extern HANDLE system_start_event;
 
 extern DWORD modified_write_thread(PVOID context);
-extern DWORD trim_thread(PVOID context);
+extern DWORD trimming_thread(PVOID context);
+extern DWORD aging_thread(PVOID context);
 
 extern VOID initialize_system(VOID);
 extern VOID run_system(VOID);

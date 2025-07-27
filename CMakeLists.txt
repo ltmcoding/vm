@@ -15,7 +15,9 @@ file(GLOB SOURCES "src/*.c")
 
 # Configure executable
 add_executable(vm ${SOURCES}
-        include/scheduler.h)
+        include/scheduler.h
+        include/bitmap.h
+        src/bitmap.c)
 
 # Configure installation
 install(TARGETS vm DESTINATION bin)

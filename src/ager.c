@@ -1,22 +1,21 @@
 #include "../include/vm.h"
 
-ULONG64 age_pte_region(PPTE_REGION *current_region)
+// TODO take pte region locks
+VOID age_pte_region(PPTE_REGION *current_region)
 {
     ULONG64 ptes_aged = 0;
+    TIME_COUNTER time_counter;
+    start_counter(&time_counter);
 
     // Check if the current region is active
     PPTE_REGION region = *current_region;
-    if (is_region_active(region))
+    if (!is_region_active(region))
     {
-        lock_pte_region(region);
-    }
-    else {
         region = get_next_active_region(region);
-        lock_pte_region(region);
     }
 
     // Because accessing the PTEs in this region will mess up the age count, we need to recount here
-    PTE_REGION_AGE_COUNT local_count;
+    PTE_REGION_AGE_COUNT local_count = {0};
 
     // Grab the first PTE in the region
     PPTE current_pte = pte_from_pte_region(region);
@@ -29,35 +28,43 @@ ULONG64 age_pte_region(PPTE_REGION *current_region)
             break;
         }
 
-        if (current_pte->memory_format.valid == 1 && current_pte->memory_format.accessed == 1)
+        if (current_pte->memory_format.valid)
         {
-            // If the PTE is accessed, we reset its age
             PTE local = read_pte(current_pte);
-            local.memory_format.age = 0;
-            write_pte(current_pte, local);
-            increase_age_count(&local_count, 0);
-            ptes_aged++;
-        }
-        else if (current_pte->memory_format.valid == 1)
-        {
-            // Increase the age count for the PTE's age
-            ULONG age = current_pte->memory_format.age;
-            increase_age_count(&local_count, age);
-
-            // If the PTE is not the oldest age, we can age it
-            if (current_pte->memory_format.age < NUMBER_OF_AGES - 1) {
-                PTE local = read_pte(current_pte);
-                local.memory_format.age++;
-                write_pte(current_pte, local);
-                ptes_aged++;
+            ULONG age = local.memory_format.age;
+            if (local.memory_format.accessed)
+            {
+                // If the PTE is accessed, we reset its age
+                local.memory_format.age = 0;
+                local.memory_format.accessed = 0;
+                age = 0;
             }
+
+            // Age the PTE if possible
+            if (local.memory_format.age < NUMBER_OF_AGES - 1)
+            {
+                age++;
+            }
+            local.memory_format.age = age;
+
+            BOOLEAN result = interlocked_write_pte(current_pte, local);
+            if (!result)
+            {
+                // If the write failed, we skip this PTE
+                // We do this because either the only way the PTE could be modified is if the accessed bit was set
+                // In this case we don't want to age it so we don't need to increase the age count
+                // Or the PTE was taken out of the active format and is now in transition or disc format
+                current_pte++;
+                continue;
+            }
+
+            increase_age_count(&local_count, age);
+            ptes_aged++;
         }
         current_pte++;
     }
 
     region->age_count = local_count;
-
-    unlock_pte_region(region);
 
     // Increment the current region and check for wrap around
     *current_region++;
@@ -65,7 +72,11 @@ ULONG64 age_pte_region(PPTE_REGION *current_region)
         *current_region = pte_regions;
     }
 
-    return ptes_aged;
+    stop_counter(&time_counter);
+    DOUBLE duration = get_counter_duration(&time_counter);
+
+    track_time(duration, ptes_aged, age_times,
+               &age_time_index, AGE_TIMES_TO_TRACK);
 }
 
 DWORD aging_thread(PVOID context)
@@ -92,10 +103,10 @@ DWORD aging_thread(PVOID context)
             break;
         }
 
-        LONG64 num_pages = *(volatile ULONG64 *) (&num_pages_to_age);
-        while (num_pages > 0) {
-            ULONG64 result = age_pte_region(&current_region);
-            num_pages -= result;
+        ULONG64 num_batches = *(volatile ULONG64 *) (&num_age_batches);
+        for (ULONG64 i = 0; i < num_batches; i++)
+        {
+            age_pte_region(&current_region);
         }
     }
     return 0;

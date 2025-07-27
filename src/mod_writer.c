@@ -11,7 +11,8 @@ BOOLEAN write_pages_to_disc(VOID)
     PPFN pfn;
     PFN local;
 
-    ULONG64 start_time = GetTickCount64();
+    TIME_COUNTER time_counter;
+    start_counter(&time_counter);
 
     // Find the target number of pages to write
     target_pages = MAX_MOD_BATCH;
@@ -138,10 +139,12 @@ BOOLEAN write_pages_to_disc(VOID)
     // Signal to other threads that pages are available
     SetEvent(pages_available_event);
 
-    ULONG64 end_time = GetTickCount64();
-    ULONG64 duration = end_time - start_time;
+    stop_counter(&time_counter);
+    DOUBLE duration = get_counter_duration(&time_counter);
 
-    track_mod_write_time(duration, target_pages);
+    track_time(duration, target_pages, mod_write_times,
+               &mod_write_time_index, MOD_WRITE_TIMES_TO_TRACK);
+
     return TRUE;
 }
 
@@ -156,7 +159,7 @@ DWORD modified_write_thread(PVOID context)
     HANDLE handles[2];
 
     handles[0] = system_exit_event;
-    handles[1] = modified_writing_event;
+    handles[1] = mw_wake_event;
 
     // This waits for the system to start before doing anything
     WaitForSingleObject(system_start_event, INFINITE);
@@ -171,7 +174,7 @@ DWORD modified_write_thread(PVOID context)
             break;
         }
 
-        ULONG64 batches = *(volatile ULONG64 *) (&num_batches_to_write);
+        ULONG64 batches = *(volatile ULONG64 *) (&num_mw_batches);
         for (ULONG64 i = 0; i < batches; i++) {
             // If there are no pages to be written, indicated by returning false
             // Then the thread waits to be woken up again and retry

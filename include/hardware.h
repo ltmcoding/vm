@@ -30,7 +30,7 @@
 #define NUMBER_OF_DISC_PAGES                     (NUMBER_OF_USER_DISC_PAGES + NUMBER_OF_SYSTEM_DISC_PAGES)
 
 #define NUMBER_OF_FAULTING_THREADS               2
-#define NUMBER_OF_SYSTEM_THREADS                 3
+#define NUMBER_OF_SYSTEM_THREADS                 4
 
 #endif //HARDWARE_H
 
