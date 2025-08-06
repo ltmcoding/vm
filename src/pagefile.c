@@ -302,6 +302,7 @@ VOID read_from_pagefile(ULONG64 disc_index, PVOID dst_va) {
     memcpy(dst_va, file_view, PAGE_SIZE);
 }
 
+// TODO flush once after all writes
 VOID write_to_pagefile(ULONG64 disc_index, PVOID src_va) {
     PVOID file_view = (char*) page_file + disc_index * PAGE_SIZE;
     memcpy(file_view, src_va, PAGE_SIZE);

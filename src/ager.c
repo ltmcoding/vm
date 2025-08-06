@@ -1,7 +1,6 @@
 #include "../include/vm.h"
 
-// TODO take pte region locks
-VOID age_pte_region(PPTE_REGION *current_region)
+ULONG64 age_pte_region(PPTE_REGION *current_region)
 {
     ULONG64 ptes_aged = 0;
     TIME_COUNTER time_counter;
@@ -14,7 +13,28 @@ VOID age_pte_region(PPTE_REGION *current_region)
         region = get_next_active_region(region);
     }
 
-    // Because accessing the PTEs in this region will mess up the age count, we need to recount here
+    lock_pte_region(region);
+    // Find the list its in from the age count
+    ULONG region_age = NUMBER_OF_AGES + 1;
+    for (ULONG i = 0; i < NUMBER_OF_AGES; i++)
+    {
+        if (region->age_count.ages[i] != 0)
+        {
+            region_age = i;
+        }
+    }
+    if (region_age == NUMBER_OF_AGES + 1)
+    {
+        // If the region was just made inactive, we can skip it
+        unlock_pte_region(region);
+        return 0;
+    }
+
+    // Find the list head for the region's age
+    PPTE_REGION_LIST listhead = &pte_region_age_lists[region_age];
+
+    // Because accessing the PTEs in this region will mess up the age count, we need to recount
+    PTE_REGION_AGE_COUNT old_count = *(volatile PTE_REGION_AGE_COUNT *) &region->age_count;
     PTE_REGION_AGE_COUNT local_count = {0};
 
     // Grab the first PTE in the region
@@ -28,9 +48,9 @@ VOID age_pte_region(PPTE_REGION *current_region)
             break;
         }
 
-        if (current_pte->memory_format.valid)
+        PTE local = read_pte(current_pte);
+        if (local.memory_format.valid)
         {
-            PTE local = read_pte(current_pte);
             ULONG age = local.memory_format.age;
             if (local.memory_format.accessed)
             {
@@ -39,32 +59,56 @@ VOID age_pte_region(PPTE_REGION *current_region)
                 local.memory_format.accessed = 0;
                 age = 0;
             }
-
-            // Age the PTE if possible
-            if (local.memory_format.age < NUMBER_OF_AGES - 1)
+            // Age the PTE if possible, but not if it has just had its accessed bit reset
+            else if (local.memory_format.age < NUMBER_OF_AGES - 1)
             {
                 age++;
             }
             local.memory_format.age = age;
 
-            BOOLEAN result = interlocked_write_pte(current_pte, local);
-            if (!result)
-            {
-                // If the write failed, we skip this PTE
-                // We do this because either the only way the PTE could be modified is if the accessed bit was set
-                // In this case we don't want to age it so we don't need to increase the age count
-                // Or the PTE was taken out of the active format and is now in transition or disc format
-                current_pte++;
-                continue;
-            }
-
+            write_pte(current_pte, local);
             increase_age_count(&local_count, age);
             ptes_aged++;
         }
         current_pte++;
     }
 
-    region->age_count = local_count;
+    for (ULONG i = 0; i < NUMBER_OF_AGES; i++)
+    {
+        WriteUShortNoFence(&region->age_count.ages[i], local_count.ages[i]);
+    }
+
+    // Use the old and new counts to update the global age count
+    for (ULONG i = 0; i < NUMBER_OF_AGES; i++)
+    {
+        InterlockedAdd64((volatile LONG64 *) &global_age_count.pages_of_age[i],
+                         local_count.ages[i] - old_count.ages[i]);
+    }
+
+    // Find the oldest age to insert the region back into the age lists
+    ULONG oldest_age = 0;
+    for (LONG i = NUMBER_OF_AGES - 1; i >= 0; i--)
+    {
+        if (local_count.ages[i] != 0)
+        {
+            oldest_age = i;
+            break;
+        }
+    }
+
+    PPTE_REGION_LIST new_listhead = &pte_region_age_lists[oldest_age];
+    if (new_listhead != listhead)
+    {
+        EnterCriticalSection(&listhead->lock);
+        remove_region_from_list(region, listhead);
+        LeaveCriticalSection(&listhead->lock);
+
+        EnterCriticalSection(&pte_region_age_lists[oldest_age].lock);
+        add_region_to_list(region, &pte_region_age_lists[oldest_age]);
+        LeaveCriticalSection(&pte_region_age_lists[oldest_age].lock);
+    }
+
+    unlock_pte_region(region);
 
     // Increment the current region and check for wrap around
     *current_region++;
@@ -77,6 +121,8 @@ VOID age_pte_region(PPTE_REGION *current_region)
 
     track_time(duration, ptes_aged, age_times,
                &age_time_index, AGE_TIMES_TO_TRACK);
+
+    return ptes_aged;
 }
 
 DWORD aging_thread(PVOID context)
@@ -103,10 +149,16 @@ DWORD aging_thread(PVOID context)
             break;
         }
 
-        ULONG64 num_batches = *(volatile ULONG64 *) (&num_age_batches);
-        for (ULONG64 i = 0; i < num_batches; i++)
+        ULONG64 num_pte_ages = *(volatile ULONG64 *) (&num_ages_global);
+        while (num_pte_ages > 0)
         {
-            age_pte_region(&current_region);
+            // Age the PTE region
+            ULONG64 ptes_aged = age_pte_region(&current_region);
+            if (ptes_aged >= num_pte_ages)
+            {
+               break;
+            }
+            num_pte_ages -= ptes_aged;
         }
     }
     return 0;

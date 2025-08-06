@@ -159,13 +159,10 @@ PFN_LIST batch_pop_from_list_head(PPFN_LIST listhead, PPFN_LIST batch_list, ULON
             remove_from_list(peeked_page);
             add_to_list_tail(peeked_page, batch_list);
 
-            // Clear the modified bit, as it is used to track whether the page has been faulted on
-            // This allows the modified writer to know if the page has been written to after being popped from the list
-            peeked_page->flags.modified = 0;
-
             // If the reference mode is on, we need to set the reference bit to 1 and then unlock the page
             if (reference_mode == TRUE) {
-                peeked_page->flags.reference = 1;
+                peeked_page->flags.reference += 1;
+                peeked_page->flags.dirtied = 0;
                 unlock_pfn(peeked_page);
             }
         }

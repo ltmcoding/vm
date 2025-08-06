@@ -2,7 +2,7 @@
 #define CONSOLE_H
 #include <Windows.h>
 
-#define BAR_WIDTH 100
+#define BAR_WIDTH 50
 
 #define COLOR_RESET "\x1b[0m"
 #define COLOR_CYAN "\x1b[36m"

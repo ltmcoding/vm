@@ -172,15 +172,15 @@ VOID initialize_region_listhead(PPTE_REGION_LIST listhead) {
     listhead->entry.Flink = listhead->entry.Blink = &listhead->entry;
 }
 
+
 VOID add_region_to_list(PPTE_REGION pte_region, PPTE_REGION_LIST listhead) {
-    PLIST_ENTRY first_entry = listhead->entry.Flink;
+    PLIST_ENTRY last_entry = listhead->entry.Blink;
 
-    pte_region->entry.Flink = first_entry;
-    pte_region->entry.Blink = &listhead->entry;
+    pte_region->entry.Blink = last_entry;
+    pte_region->entry.Flink = &listhead->entry;
 
-    first_entry->Blink = &pte_region->entry;
-
-    listhead->entry.Flink = &pte_region->entry;
+    last_entry->Flink = &pte_region->entry;
+    listhead->entry.Blink = &pte_region->entry;
 
     listhead->num_regions++;
 }
@@ -200,8 +200,6 @@ VOID remove_region_from_list(PPTE_REGION pte_region, PPTE_REGION_LIST listhead) 
 }
 
 PPTE_REGION pop_region_from_list(PPTE_REGION_LIST listhead) {
-    // This is a helper function that pops a region from the list
-    // It is used to pop the first region from the list
     if (listhead->num_regions == 0) {
         return NULL;
     }
@@ -230,8 +228,8 @@ PPTE_REGION pop_region_from_list(PPTE_REGION_LIST listhead) {
 }
 
 BOOLEAN is_region_active(PPTE_REGION pte_region) {
-    // This checks if the region is active
-    return pte_region->active == 1;
+    PTE_REGION local_region = *(volatile PTE_REGION *) pte_region;
+    return local_region.active;
 }
 
 VOID make_region_active(PPTE_REGION pte_region) {
@@ -264,11 +262,14 @@ VOID increase_age_count(PPTE_REGION_AGE_COUNT age_count, ULONG age) {
     age_count->ages[age]++;
 }
 
-// TODO replace this with a bitmap that uses interlocked
+// TODO this has problems, this should be replaced with a tree of active regions
 PPTE_REGION get_next_active_region(PPTE_REGION pte_region) {
     do {
         pte_region++;
-    } while (pte_region->active == 0);
+        if (pte_region >= pte_regions_end) {
+            pte_region = pte_regions;
+        }
+    } while (is_region_active(pte_region) == FALSE);
 
     return pte_region;
 }

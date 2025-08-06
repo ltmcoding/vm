@@ -3,8 +3,7 @@
 #include "../include/vm.h"
 #include "../include/debug.h"
 
-
-BOOLEAN write_pages_to_disc(VOID)
+VOID write_pages_to_disc(PULONG64 target_writes)
 {
     ULONG64 target_pages;
     PFN_LIST batch_list;
@@ -15,14 +14,13 @@ BOOLEAN write_pages_to_disc(VOID)
     start_counter(&time_counter);
 
     // Find the target number of pages to write
-    target_pages = MAX_MOD_BATCH;
-
-    // There is no reason to get more pages than we have disc indices
-    // This check is done without locks, so it is not perfectly accurate
-    // Still, it will give us a good enough heuristic of our supply of modified pages
-    if (modified_page_list.num_pages < target_pages)
+    if (*target_writes > MAX_MOD_BATCH)
     {
-        target_pages = modified_page_list.num_pages;
+        target_pages = MAX_MOD_BATCH;
+    }
+    else
+    {
+        target_pages = *target_writes;
     }
 
     // Get as many disc indices as we can
@@ -30,7 +28,8 @@ BOOLEAN write_pages_to_disc(VOID)
     ULONG num_returned_indices = get_disc_indices(disc_indices, target_pages);
     if (num_returned_indices == 0)
     {
-        return FALSE;
+        // TODO Figure out if we want to track this
+        return;
     }
 
     // Bound the number of pages to pull off the modified list by the number of disc indices we have
@@ -48,7 +47,7 @@ BOOLEAN write_pages_to_disc(VOID)
     {
         LeaveCriticalSection(&modified_page_list.lock);
         free_disc_indices(disc_indices, num_returned_indices, 0);
-        return FALSE;
+        return;
     }
 
     // Pop the modified pages
@@ -60,7 +59,7 @@ BOOLEAN write_pages_to_disc(VOID)
     if (batch_list.num_pages == 0)
     {
         free_disc_indices(disc_indices, num_returned_indices, 0);
-        return FALSE;
+        return;
     }
 
     // Find the frame numbers associated with the PFNs
@@ -93,27 +92,33 @@ BOOLEAN write_pages_to_disc(VOID)
         lock_pfn(pfn);
         local = read_pfn(pfn);
 
-        // The modified bit allows us to tell whether the page was changed during the write
+        // The dirtied bit allows us to tell whether the page was changed during the write
         // Without the bit a page that went to active and then back to modified could not be differentiated
         // From one that was never touched. If a page was written to, it could be written twice
         // And its first page file write would be stale data
-        if (local.flags.modified == 0) {
+        if (local.flags.dirtied == 0) {
             local.disc_index = disc_indices[i];
             local.flags.state = STANDBY;
             local.flags.reference -= 1;
             write_pfn(pfn, local);
         }
-        // In this case we know that the page in memory was written during our pagefile write
+        // In this case we know that the page in memory was written during our page file write
         // We have to throw away our page file space as it is stale data now
         else {
             local.flags.reference -= 1;
-            local.flags.modified = 0;
+            local.flags.dirtied = 0;
             write_pfn(pfn, local);
+
+            // TODO have a second batch list to put back on to modified
+            // TODO check the state of the pfn. if it is active then dont put it on any list
+            // TODO If it is dangling (new state) then put it on the modified list
+            assert(FALSE)
+            //remove_from_list(pfn);
 
             frame_numbers[i] = 0;
             free_disc_index(disc_indices[i]);
         }
-        // Once reads are implemented, the write is still good and we should keep the copy on the disc.
+        // Once reads are implemented, the write is still good, and we should keep the copy on the disc.
         // We just decrement our reference count
     }
 
@@ -128,7 +133,7 @@ BOOLEAN write_pages_to_disc(VOID)
 
     for (ULONG64 i = 0; i < target_pages; i++)
     {
-        // If the frame number is zero, it means that the page was written to and we freed the disc index
+        // If the frame number is zero, it means that the page was written to, and we freed the disc index
         if (frame_numbers[i] != 0)
         {
             // Unlock the PFN so that it can be used again
@@ -145,7 +150,13 @@ BOOLEAN write_pages_to_disc(VOID)
     track_time(duration, target_pages, mod_write_times,
                &mod_write_time_index, MOD_WRITE_TIMES_TO_TRACK);
 
-    return TRUE;
+    // Decrease the target writes by the number of pages we wrote
+    if (*target_writes < target_pages) {
+        *target_writes = 0;
+    }
+    else {
+        *target_writes -= target_pages;
+    }
 }
 
 
@@ -167,21 +178,40 @@ DWORD modified_write_thread(PVOID context)
 
     while (TRUE)
     {
-        ULONG index = WaitForMultipleObjects(ARRAYSIZE(handles), handles, FALSE, 1000);
-        if (index == 0)
-        {
-            set_modified_status("modified write thread exited");
-            break;
-        }
+        ULONG64 num_mod_writes = 0;
 
-        ULONG64 batches = *(volatile ULONG64 *) (&num_mw_batches);
-        for (ULONG64 i = 0; i < batches; i++) {
-            // If there are no pages to be written, indicated by returning false
-            // Then the thread waits to be woken up again and retry
-            if (write_pages_to_disc() == FALSE)
+        ULONG64 average_page_consumption = average_page_consumption_global;
+
+        ULONG64 consumable_pages = *(volatile ULONG_PTR *) (&free_page_list.num_pages) +
+                                         *(volatile ULONG_PTR *) (&standby_page_list.num_pages);
+
+        DOUBLE time_until_no_pages = (DOUBLE) consumable_pages / (DOUBLE) average_page_consumption;
+
+        // Find how long it takes to write a page to disc
+        TIME_MEASURE mw_average = average_tracked_times(mod_write_times, ARRAYSIZE(mod_write_times));
+        global_mw_average = *(volatile TIME_MEASURE *) (&mw_average);
+
+        DOUBLE mw_per_page_cost = mw_average.duration / (DOUBLE) mw_average.num_pages;
+
+        // Find how long it will take us to empty our modified list completely and convert to seconds
+        ULONG64 modified_pages = *(volatile ULONG64 *) (&modified_page_list.num_pages);
+        DOUBLE time_to_mw = (DOUBLE) modified_pages * mw_per_page_cost;
+
+        if (time_until_no_pages < time_to_mw) {
+            // If we don't have enough time to empty the modified list, write constantly
+            num_mod_writes = modified_pages;
+        } else {
+            // Wait for the events only if we've actively checked if we need to write modified pages
+            ULONG index = WaitForMultipleObjects(ARRAYSIZE(handles), handles, FALSE, 1000);
+            if (index == 0)
             {
+                set_modified_status("modified write thread exited");
                 break;
             }
+        }
+
+        while (num_mod_writes > 0) {
+            write_pages_to_disc(&num_mod_writes);
         }
     }
 

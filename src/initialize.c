@@ -7,6 +7,7 @@
 #include "../include/console.h"
 
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "onecore.lib")
 
 int compare(const void * a, const void * b);
 
@@ -30,6 +31,7 @@ HANDLE disc_spot_available_event;
 HANDLE system_exit_event;
 HANDLE system_start_event;
 
+HANDLE shared_memory_section;
 
 // These are the locks used in our system
 CRITICAL_SECTION modified_write_va_lock;
@@ -92,6 +94,31 @@ VOID get_privilege(VOID)
     }
 
     CloseHandle(token);
+}
+
+HANDLE CreateSharedMemorySection(VOID) {
+    HANDLE section;
+    MEM_EXTENDED_PARAMETER parameter = { 0 };
+
+    //
+    // Create an AWE section.  Later we deposit pages into it and/or
+    // return them.
+    //
+
+    parameter.Type = MemSectionExtendedParameterUserPhysicalFlags;
+    parameter.ULong = 0;
+
+    section = CreateFileMapping2 (INVALID_HANDLE_VALUE,
+                                  NULL,
+                                  SECTION_MAP_READ | SECTION_MAP_WRITE,
+                                  PAGE_READWRITE,
+                                  SEC_RESERVE,
+                                  0,
+                                  NULL,
+                                  &parameter,
+                                  1);
+
+    return section;
 }
 
 // This function is used to initialize all the locks used in the system
@@ -305,19 +332,22 @@ VOID initialize_page_lists(VOID)
 // Or when we move a page from the page file to memory and vice versa
 VOID initialize_system_va_space(VOID)
 {
+    MEM_EXTENDED_PARAMETER parameter = { 0 };
+    parameter.Type = MemExtendedParameterUserPhysicalHandle;
+    parameter.Handle = shared_memory_section;
+
     set_initialize_status("initialize_system", "setting up system VAs");
 
-    // TODO MAKE THIS A GLOBAL CONSTANT
-    modified_write_va = VirtualAlloc(NULL,PAGE_SIZE * 256,MEM_RESERVE | MEM_PHYSICAL,
-                                     PAGE_READWRITE);
+    modified_write_va = VirtualAlloc2(NULL, NULL, PAGE_SIZE * MAX_MOD_BATCH, MEM_RESERVE | MEM_PHYSICAL,
+                                    PAGE_READWRITE, &parameter, 1);
     NULL_CHECK(modified_write_va, "initialize_system_va_space : could not reserve memory for modified write va")
 
-    modified_read_va = VirtualAlloc(NULL,PAGE_SIZE,MEM_RESERVE | MEM_PHYSICAL,
-                                    PAGE_READWRITE);
+    modified_read_va = VirtualAlloc2(NULL, NULL, PAGE_SIZE, MEM_RESERVE | MEM_PHYSICAL,
+                                    PAGE_READWRITE, &parameter, 1);
     NULL_CHECK(modified_read_va, "initialize_system_va_space : could not reserve memory for modified read va")
 
-    repurpose_zero_va = VirtualAlloc(NULL,PAGE_SIZE,MEM_RESERVE | MEM_PHYSICAL,
-                                    PAGE_READWRITE);
+    repurpose_zero_va = VirtualAlloc2(NULL, NULL, PAGE_SIZE, MEM_RESERVE | MEM_PHYSICAL,
+                                    PAGE_READWRITE, &parameter, 1);
     NULL_CHECK(repurpose_zero_va, "initialize_system_va_space : could not reserve memory for repurpose zero va")
 }
 
@@ -337,8 +367,16 @@ VOID initialize_user_va_space(VOID)
     // Uses bit operations instead of modulus to do this quicker
     virtual_address_size &= ~(PAGE_SIZE - 1);
 
-    va_base = VirtualAlloc(NULL, virtual_address_size,MEM_RESERVE | MEM_PHYSICAL,
-                           PAGE_READWRITE);
+    // TODO make global
+    MEM_EXTENDED_PARAMETER parameter = { 0 };
+    parameter.Type = MemExtendedParameterUserPhysicalHandle;
+    parameter.Handle = shared_memory_section;
+
+    va_base = VirtualAlloc2(NULL, NULL, virtual_address_size, MEM_RESERVE | MEM_PHYSICAL,
+                            PAGE_READWRITE, &parameter, 1);
+
+    // va_base = VirtualAlloc(NULL, virtual_address_size,MEM_RESERVE | MEM_PHYSICAL,
+    //                        PAGE_READWRITE);
     NULL_CHECK(va_base, "initialize_user_va_space : could not reserve memory for va space")
 
     //va__end = va_base + virtual_address_size;
@@ -406,7 +444,7 @@ VOID initialize_pfn_metadata(VOID)
 
     // We need the highest frame number in our page pool
     // Because the operating system gives us random pages from its pool instead of a sequential range
-    ULONG64 num_pfn_bytes = (highest_frame_number) * sizeof(PFN);
+    ULONG64 num_pfn_bytes = (highest_frame_number + 1) * sizeof(PFN);
 
     // We reserve memory for the PFNs, but do not commit it
     // This is because we do not have all PFNs between our lowest and highest frame numbers in our page pool
@@ -416,7 +454,7 @@ VOID initialize_pfn_metadata(VOID)
     pfn_base = VirtualAlloc(NULL, num_pfn_bytes, MEM_RESERVE, PAGE_READWRITE);
     NULL_CHECK(pfn_base, "initialize_pfn_metadata : could not reserve memory for pfn metadata")
 
-    pfn_base -= lowest_frame_number * sizeof(PFN);
+    // pfn_base -= lowest_frame_number * sizeof(PFN);
     pfn_end = pfn_base + num_pfn_bytes;
 
     PPFN pfn;
@@ -440,13 +478,16 @@ VOID initialize_pfn_metadata(VOID)
         {
             // Commit memory for the next page as well
             LPVOID result = VirtualAlloc((BYTE*)pfn_base + offset, sizeof(PFN) + PAGE_SIZE, MEM_COMMIT, PAGE_READWRITE);
-            NULL_CHECK(result, "initialize_pfn_metadata : could not commit memory for pfn metadata")
+            //NULL_CHECK(result, "initialize_pfn_metadata : could not commit memory for pfn metadata")
+            if (result == NULL) {
+                DebugBreak();
+            }
         }
         else
 #endif
         {
             // Commit memory for the pfn inside our reserved chunk
-            LPVOID result = VirtualAlloc((BYTE*)pfn_base + offset, sizeof(PFN), MEM_COMMIT, PAGE_READWRITE);
+            LPVOID result = VirtualAlloc((BYTE*) pfn_base + offset, sizeof(PFN), MEM_COMMIT, PAGE_READWRITE);
             NULL_CHECK(result, "initialize_pfn_metadata : could not commit memory for pfn metadata")
         }
 
@@ -497,7 +538,7 @@ VOID initialize_pages()
     NULL_CHECK(physical_page_numbers, "initialize_pages : could not allocate memory for physical page numbers")
 
     // This is where we actually allocate the pages of memory into our page pool
-    if (AllocateUserPhysicalPages(physical_page_handle,&physical_page_count,
+    if (AllocateUserPhysicalPages(shared_memory_section,&physical_page_count,
                                   physical_page_numbers) == FALSE) {
         fatal_error("initialize_pages : could not allocate physical pages");
     }
@@ -507,13 +548,21 @@ VOID initialize_pages()
                DESIRED_NUMBER_OF_PHYSICAL_PAGES);
     }
 
-    // TODO just find the highest frame number and the minumum frame number
-    // Subtract from the pointer
-    find_frame_number_range();
 
+    find_frame_number_range();
 }
 
 VOID initialize_time_measures(VOID) {
+    for (ULONG i = 0; i < MOD_WRITE_TIMES_TO_TRACK; i++) {
+        mod_write_times[i].num_pages = MAXULONG64;
+    }
+    for (ULONG i = 0; i < AGE_TIMES_TO_TRACK; i++) {
+        age_times[i].num_pages = MAXULONG64;
+    }
+    for (ULONG i = 0; i < TRIM_TIMES_TO_TRACK; i++) {
+        trim_times[i].num_pages = MAXULONG64;
+    }
+
     // Fill the first entries of the time measures with sample data
     track_time(0.010, MAX_MOD_BATCH, mod_write_times,
                &mod_write_time_index, MOD_WRITE_TIMES_TO_TRACK);
@@ -559,7 +608,9 @@ VOID initialize_system (VOID) {
     // Acquire privilege as the operating system reserves the sole right to allocate pages.
     get_privilege();
 
-    physical_page_handle = GetCurrentProcess();
+    //physical_page_handle = GetCurrentProcess();
+    shared_memory_section = CreateSharedMemorySection();
+    NULL_CHECK(shared_memory_section, "initialize_system : could not create shared memory section");
 
     initialize_locks();
 

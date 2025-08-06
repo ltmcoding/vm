@@ -13,7 +13,7 @@
 typedef struct {
     // States are FREE, STANDBY, ZEROED (to be added), ACTIVE, and MODIFIED
     ULONG state:3;
-    ULONG modified:1;
+    ULONG dirtied:1;
     ULONG reference:3;
 }PFN_FLAGS/*, *PPFN_FLAGS*/;
 

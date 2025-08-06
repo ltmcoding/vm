@@ -110,7 +110,7 @@ VOID full_virtual_memory_test(VOID) {
     time_elapsed = end_time - start_time;
 
     // Final status update
-    // TODO
+
 
     // Consolidated into one print statement
     printf("\nfull_virtual_memory_test : thread %lu finished accessing %llu passthroughs "
