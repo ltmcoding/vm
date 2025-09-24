@@ -4,7 +4,6 @@
 
 For a surface-level explanation of the memory manager, click here: https://docs.google.com/document/d/1152bx53z44v_KMxqAU13WA0q--mN1a79ag8CcTIqHV8/edit?usp=sharing
 
-For a deeper look at how my program's strategy and design work, click here: https://docs.google.com/document/d/1GHuGTrIIc1A8fGdAQWCf-m2kZNU2gPezx9Fx7e-YfG0/edit?usp=sharing
-This paper will be published in the spring issue of the Menlo School Roundtable, a school publication that showcases exemplary student work.
+For a deeper look at how my program's strategy and design work, click here: https://www.menloschool.org/live/files/4094-landon-moceri-round-table-spring-edition-pdf
 
 If you have any inquiries about this project, feel free to email me at: landon@ltmcoding.dev
