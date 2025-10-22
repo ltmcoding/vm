@@ -10,11 +10,15 @@ PFN_LIST standby_page_list;
 VOID initialize_listhead(PPFN_LIST listhead)
 {
     listhead->entry.Flink = listhead->entry.Blink = &listhead->entry;
+    listhead->num_pages = 0;
 }
 
 BOOLEAN is_list_empty(PPFN_LIST listhead)
 {
-    return listhead->entry.Flink == &listhead->entry;
+    ULONG64 empty_count = listhead->num_pages == 0;
+    BOOLEAN empty_list = listhead->entry.Flink == &listhead->entry;
+    assert(empty_count == empty_list);
+    return empty_list;
 }
 
 // Removes the pfn from the list corresponding to its state

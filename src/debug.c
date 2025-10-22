@@ -28,12 +28,6 @@ VOID check_list_integrity(PPFN_LIST listhead, PPFN match_pfn)
     if (CHECK_INTEGRITY == 0) {
         return;
     }
-    // This makes sure that this list is actually owned by the calling thread
-    if (listhead->lock.OwningThread == NULL)
-    {
-        // Because this is only meant to be run while debugging, we break into the debugger instead of crashing
-        DebugBreak();
-    }
 
     // We start at the first entry on our list and iterate to the end of it
     flink_entry = listhead->entry.Flink;

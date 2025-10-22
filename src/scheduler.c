@@ -155,11 +155,26 @@ DWORD task_scheduling_thread(PVOID context)
         ULONG64 num_ages_local = 0;
 
         // Take a tally of how many PTEs are of each age
-        GLOBAL_AGE_COUNT age_count_snapshot = *(volatile GLOBAL_AGE_COUNT *) &global_age_count;
+        GLOBAL_AGE_COUNT age_count_snapshot;
+        for (ULONG i = 0; i < NUMBER_OF_AGES; i++) {
+            age_count_snapshot.pages_of_age[i] = *(volatile ULONG64 *)(&global_age_count.pages_of_age[i]);
+        }
+
         ULONG64 total_active_pages = 0;
         for (ULONG i = 0; i < NUMBER_OF_AGES; i++) {
             total_active_pages += age_count_snapshot.pages_of_age[i];
         }
+        if (total_active_pages == 0) {
+            // If there are no active pages, we can skip aging
+            SetEvent(mw_wake_event);
+            SetEvent(trim_wake_event);
+            continue;
+        }
+
+        // TODO reads at the top available pages
+
+        // TODO why is mod writer falling behind?
+        // TODO why is the global count of page ages broken
 
         // Find out how long it takes to age a page
         TIME_MEASURE age_average = average_tracked_times(age_times, ARRAYSIZE(age_times));
@@ -173,12 +188,12 @@ DWORD task_scheduling_thread(PVOID context)
         // If we have enough time we want to calculate the fraction of each second that we should be aging
         // And multiply it by the max number of batches we can age in a second
         // Otherwise we will simply age the maximum number of batches we can age in a second
-        if (time_until_no_pages <= time_to_age_all) {
+        if (time_until_no_pages >= time_to_age_all) {
             // We know at this point that we have extra time so we don't need to age constantly
             // We divide the time to age all pages by the time until we have no more pages
             // This gives us a fraction of the time that we should age
             DOUBLE fraction_used = (DOUBLE) time_to_age_all / (DOUBLE) time_until_no_pages;
-            assert(fraction_used <= 1);
+            assert(fraction_used <= 1.0);
             num_ages_local = (ULONG64) ((DOUBLE) max_possible_ages * fraction_used);
         } else {
             // Otherwise, we can age constantly

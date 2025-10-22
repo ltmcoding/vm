@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <Windows.h>
 #include "../include/vm.h"
 #include "../include/debug.h"
@@ -128,7 +129,6 @@ VOID trim_pte_region(PULONG64 target_trims) {
         // If there are no active pages left in the region, we can make it inactive, unlock, and return
         if (oldest_age == NUMBER_OF_AGES) {
             make_region_inactive(region);
-            unlock_pte_region(region);
         } else {
             PPTE_REGION_LIST new_listhead = &pte_region_age_lists[oldest_age];
 

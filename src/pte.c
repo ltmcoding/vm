@@ -204,27 +204,22 @@ PPTE_REGION pop_region_from_list(PPTE_REGION_LIST listhead) {
         return NULL;
     }
 
-    PLIST_ENTRY current_entry = listhead->entry.Flink;
-    PPTE_REGION pte_region = CONTAINING_RECORD(current_entry, PTE_REGION, entry);
+    PPTE_REGION pte_region;
 
-    while (current_entry != &listhead->entry) {
+    for (PLIST_ENTRY current_entry = listhead->entry.Flink;
+        current_entry != &listhead->entry;
+        current_entry = current_entry->Flink) {
+
+        pte_region = CONTAINING_RECORD(current_entry, PTE_REGION, entry);
         // Try to lock the region, if we can, we break out
         // If we cannot, we continue to the next entry
         if (TryEnterCriticalSection(&pte_region->lock)) {
-            break;
+            remove_region_from_list(pte_region, listhead);
+            return pte_region;
         }
-
-        current_entry = current_entry->Flink;
-        if (current_entry == &listhead->entry) {
-            // If we reached the end of the list, we return NULL
-            return NULL;
-        }
-
-        pte_region = CONTAINING_RECORD(current_entry, PTE_REGION, entry);
     }
 
-    remove_region_from_list(pte_region, listhead);
-    return pte_region;
+    return NULL;
 }
 
 BOOLEAN is_region_active(PPTE_REGION pte_region) {

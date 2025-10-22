@@ -13,7 +13,6 @@
 // We are using MB(x) as a placeholder for 2^20, the purpose of this is just to get a large number
 // This number represents the number of times we will access a random virtual address in our range
 // MB has no reflection on the actual size of the memory we are using
-#define BAR_WIDTH 100
 #define NUM_PASSTHROUGHS  ((ULONG64) 2)
 
 ULONG64 num_trims = 0;
